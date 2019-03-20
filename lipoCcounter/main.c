@@ -31,10 +31,12 @@
 #define MEASURE_INTERVAL_NS 500000000UL
 
 #define ADC_CONVERSION_IN_PROGRESS (ADCSRA & BIT(ADSC))
+#define ADC_CONVERSION_IS_BIPOLAR (ADCSRB & BIT(BIN))
 
 volatile uint16_t adc_cnt;
 volatile uint16_t adc;
 volatile int16_t adcs;
+volatile int16_t adc_diff_cal;
 
 int64_t current_uA;
 int16_t voltage_mV;
@@ -45,6 +47,7 @@ struct timeval_t last_measure;
 int32_t uws_count;
 
 volatile struct {
+	uint8_t adc_cal:1;
 	uint8_t adc_I:1;
 	uint8_t adc_U:1;
 } flags;
@@ -66,6 +69,9 @@ struct UCI_ISC_Reg reg_mWl;
 struct UCI_ISC_Reg reg_uptimeh;
 struct UCI_ISC_Reg reg_uptimel;
 
+struct UCI_ISC_Reg reg_adc_calh;
+struct UCI_ISC_Reg reg_adc_call;
+
 struct UCI_ISC_Reg* regs[] = {
 	&reg_Ih,
 	&reg_Il,
@@ -78,11 +84,14 @@ struct UCI_ISC_Reg* regs[] = {
 	&reg_mWh,
 	&reg_mWl,
 	&reg_uptimeh,
-	&reg_uptimel
+	&reg_uptimel,
+	&reg_adc_calh,
+	&reg_adc_call,
 };
 
 enum {
 	ADC_STATE_IDLE = 0,
+	ADC_STATE_CAL,
 	ADC_STATE_I,
 	ADC_STATE_U,
 };
@@ -222,18 +231,26 @@ void shutdown_adc() {
 
 void adc_start_measure() {
 	setup_adc();
-	state.adc = ADC_STATE_I;
-	// Setup ADC for differential measurement
-	ADMUX  = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
+	state.adc = ADC_STATE_CAL;
+	// Setup ADC for differential offset measurement
+	ADMUX  = BIT(REFS1) | BIT(MUX2) | BIT(MUX0);
 	ADCSRA = BIT(ADEN) | BIT(ADIE) | BIT(ADPS0) | BIT(ADPS1) | BIT(ADPS2);
 	ADCSRB = BIT(BIN);
 }
 
 void adc_process() {
 	int64_t tmp;
+	if(flags.adc_cal) {
+		flags.adc_cal = 0;
+		adc_diff_cal = adcs;
+		reg_adc_calh.data = (adcs >> 8) & 0xFF;
+		reg_adc_call.data = adcs & 0xFF;
+		state.adc = ADC_STATE_I;
+		ADMUX = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
+	}
 	if(flags.adc_I) {
 		flags.adc_I = 0;
-		tmp = adcs;
+		tmp = adcs - adc_diff_cal;
 		tmp = tmp * REF_VOLTAGE * SHUNT_RESITANCE / CURRENT_GAIN / 512UL / ADC_SAMPLES;
 		current_uA = tmp;
 		tmp /= 10;
@@ -336,25 +353,24 @@ uint16_t adc_val() {
 }
 
 ISR(ADC_vect) {
-	switch(state.adc) {
-		case ADC_STATE_I:
-			adcs += adc_val_bipo();
-			adc_cnt++;
-			if(adc_cnt >= ADC_SAMPLES) {
-				adc_cnt = 0;
+	if(ADC_CONVERSION_IS_BIPOLAR) {
+		adcs += adc_val_bipo();
+	} else {
+		adc += adc_val();
+	}
+	adc_cnt++;
+	if(adc_cnt >= ADC_SAMPLES) {
+		adc_cnt = 0;
+		switch(state.adc) {
+			case ADC_STATE_CAL:
+				flags.adc_cal = 1;
+				break;
+			case ADC_STATE_I:
 				flags.adc_I = 1;
-				ADCSRA &= ~BIT(ADATE);
-			}
-			break;
-		case ADC_STATE_U:
-			adc += adc_val();
-			adc_cnt++;
-			if(adc_cnt >= ADC_SAMPLES) {
-				adc_cnt = 0;
+				break;
+			case ADC_STATE_U:
 				flags.adc_U = 1;
-				ADCSRA &= ~BIT(ADATE);
-			}
-			break;
+		}
 	}
 }
 
