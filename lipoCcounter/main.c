@@ -300,7 +300,8 @@ int main(void)
 	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
 
 	sei();
-    while (1) {
+	while (1) {
+		uint8_t sleep_mode;
 		struct timeval_t time;
 		// Actions
 		now(&time);
@@ -319,25 +320,21 @@ int main(void)
 		// Sleep
 		if(USI_I2C_Busy()) {
 			set_time_source(CLOCK_TIMER);
-			/* According to appnote we should not need this?
-			ATOMIC_BEGIN
-			if(state.adc != ADC_STATE_IDLE && !ADC_CONVERSION_IN_PROGRESS) {
-				ADCSRA |= BIT(ADSC);
-			}
-			ATOMIC_END
-			*/
-			set_sleep_mode(SLEEP_MODE_IDLE);
+			sleep_mode = SLEEP_MODE_IDLE;
 		} else {
 			set_time_source(CLOCK_WDT);
-			// We could probably go into an even deeper sleep mode if the ADC was not running
-			set_sleep_mode(SLEEP_MODE_ADC);
+			sleep_mode = SLEEP_MODE_PWR_DOWN;
+			if(state.adc == ADC_STATE_IDLE) {
+				sleep_mode = SLEEP_MODE_ADC;
+			}
 		}
+		set_sleep_mode(sleep_mode);
 		sleep_enable();
 		sleep_cpu();
 		
 		// Data processing
 		adc_process();
-    }
+	}
 }
 
 int16_t adc_val_bipo() {
