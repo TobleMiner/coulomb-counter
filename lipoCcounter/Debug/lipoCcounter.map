@@ -48,6 +48,9 @@ Common symbol       size              file
 
 reg_Ih              0x2               main.o
 reg_Uh              0x2               main.o
+reg_uWsl            0x2               main.o
+reg_uWsh            0x2               main.o
+uws_count           0x4               main.o
 usi_i2c_regs        0x2               usi_i2c_slave.o
 usi_i2c_slave_address
                     0x1               usi_i2c_slave.o
@@ -59,21 +62,18 @@ usi_i2c_slave_internal_address
 adcs                0x2               main.o
 USI_I2C_Slave_State
                     0x1               usi_i2c_slave.o
-reg_uWhh            0x2               main.o
-reg_uWhml           0x2               main.o
 adc                 0x2               main.o
 adc_cnt             0x2               main.o
+reg_uWsmh           0x2               main.o
 last_measure        0x10              main.o
 reg_Ul              0x2               main.o
 current_uA          0x8               main.o
 usi_i2c_mode        0x1               usi_i2c_slave.o
 reg_Il              0x2               main.o
 past                0x10              main.o
-reg_uWhmh           0x2               main.o
 usi_i2c_flags       0x1               usi_i2c_slave.o
-uwh_count           0x4               main.o
 flags               0x1               main.o
-reg_uWhl            0x2               main.o
+reg_uWsml           0x2               main.o
 reg_mWl             0x2               main.o
 
 Discarded input sections
@@ -728,22 +728,22 @@ END GROUP
  COMMON         0x00800076       0x49 main.o
                 0x00800076                reg_Ih
                 0x00800078                reg_Uh
-                0x0080007a                reg_mWh
-                0x0080007c                voltage_mV
-                0x0080007e                adcs
-                0x00800080                reg_uWhh
-                0x00800082                reg_uWhml
-                0x00800084                adc
-                0x00800086                adc_cnt
-                0x00800088                last_measure
-                0x00800098                reg_Ul
-                0x0080009a                current_uA
-                0x008000a2                reg_Il
-                0x008000a4                past
-                0x008000b4                reg_uWhmh
-                0x008000b6                uwh_count
+                0x0080007a                reg_uWsl
+                0x0080007c                reg_uWsh
+                0x0080007e                uws_count
+                0x00800082                reg_mWh
+                0x00800084                voltage_mV
+                0x00800086                adcs
+                0x00800088                adc
+                0x0080008a                adc_cnt
+                0x0080008c                reg_uWsmh
+                0x0080008e                last_measure
+                0x0080009e                reg_Ul
+                0x008000a0                current_uA
+                0x008000a8                reg_Il
+                0x008000aa                past
                 0x008000ba                flags
-                0x008000bb                reg_uWhl
+                0x008000bb                reg_uWsml
                 0x008000bd                reg_mWl
  COMMON         0x008000bf        0x8 usi_i2c_slave.o
                 0x008000bf                usi_i2c_regs
@@ -857,11 +857,11 @@ END GROUP
  .debug_frame   0x00000000      0x230 main.o
  .debug_frame   0x00000230       0x7c usi_i2c_slave.o
 
-.debug_str      0x00000000      0x454
+.debug_str      0x00000000      0x45e
  *(.debug_str)
- .debug_str     0x00000000      0x2ec main.o
+ .debug_str     0x00000000      0x2f6 main.o
                                 0x35d (size before relaxing)
- .debug_str     0x000002ec      0x168 usi_i2c_slave.o
+ .debug_str     0x000002f6      0x168 usi_i2c_slave.o
                                 0x302 (size before relaxing)
 
 .debug_loc      0x00000000      0x74b

@@ -41,7 +41,7 @@ struct timeval_t {
 struct timeval_t past;
 struct timeval_t last_measure;
 
-int32_t uwh_count;
+int32_t uws_count;
 
 volatile struct {
 	uint8_t adc_I:1;
@@ -54,10 +54,10 @@ struct UCI_ISC_Reg reg_Il;
 struct UCI_ISC_Reg reg_Uh;
 struct UCI_ISC_Reg reg_Ul;
 
-struct UCI_ISC_Reg reg_uWhh;
-struct UCI_ISC_Reg reg_uWhmh;
-struct UCI_ISC_Reg reg_uWhml;
-struct UCI_ISC_Reg reg_uWhl;
+struct UCI_ISC_Reg reg_uWsh;
+struct UCI_ISC_Reg reg_uWsmh;
+struct UCI_ISC_Reg reg_uWsml;
+struct UCI_ISC_Reg reg_uWsl;
 
 struct UCI_ISC_Reg reg_mWh; 
 struct UCI_ISC_Reg reg_mWl;
@@ -67,10 +67,10 @@ struct UCI_ISC_Reg* regs[] = {
 	&reg_Il,
 	&reg_Uh,
 	&reg_Ul,
-	&reg_uWhh,
-	&reg_uWhmh,
-	&reg_uWhml,
-	&reg_uWhl,
+	&reg_uWsh,
+	&reg_uWsmh,
+	&reg_uWsml,
+	&reg_uWsl,
 	&reg_mWh,
 	&reg_mWl
 };
@@ -113,12 +113,12 @@ void update_uwh_count() {
 	reg_mWh.data = (power_mW >> 8) & 0xFF;
 	reg_mWl.data = power_mW & 0xFF;
 
-	uwh_count += ((int64_t)delta.secs) * power_uW;
-	uwh_count += ((int64_t)delta.nsecs) * power_mW / ((int64_t)SEC_USECS);
-	reg_uWhh.data = (uwh_count >> 24) & 0xFF;
-	reg_uWhmh.data = (uwh_count >> 16) & 0xFF;
-	reg_uWhml.data = (uwh_count >> 8) & 0xFF;
-	reg_uWhl.data = (uwh_count >> 0) & 0xFF;
+	uws_count += ((int64_t)delta.secs) * power_uW;
+	uws_count += ((int64_t)delta.nsecs) * power_mW / ((int64_t)SEC_USECS);
+	reg_uWsh.data = (uws_count >> 24) & 0xFF;
+	reg_uWsmh.data = (uws_count >> 16) & 0xFF;
+	reg_uWsml.data = (uws_count >> 8) & 0xFF;
+	reg_uWsl.data = (uws_count >> 0) & 0xFF;
 	last_measure = current;
 }
 
