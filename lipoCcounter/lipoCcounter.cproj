@@ -138,9 +138,6 @@
     <Compile Include="main.c">
       <SubType>compile</SubType>
     </Compile>
-    <Compile Include="spi.c">
-      <SubType>compile</SubType>
-    </Compile>
     <Compile Include="usi_i2c_slave.c">
       <SubType>compile</SubType>
     </Compile>
