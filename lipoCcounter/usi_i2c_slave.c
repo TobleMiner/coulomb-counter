@@ -20,10 +20,16 @@
 \*-----------------------------------------------------*/
 
 #include "usi_i2c_slave.h"
+#include "util.h"
 
 char usi_i2c_slave_internal_address;
 char usi_i2c_slave_address;
 char usi_i2c_mode;
+
+#define USI_I2C_TIMEOUT_NS 10000000;
+
+struct timeval_t usi_i2c_timeout;
+struct timeval_t usi_i2c_last_xfer;
 
 uint8_t usi_i2c_num_regs;
 struct UCI_ISC_Reg** usi_i2c_regs;
@@ -89,6 +95,11 @@ void USI_I2C_Init(char address, struct UCI_ISC_Reg** regs, uint8_t num_regs) {
 	usi_i2c_slave_address = address;
 	usi_i2c_regs = regs;
 	usi_i2c_num_regs = num_regs;
+	
+	usi_i2c_timeout.secs = 0;
+	usi_i2c_timeout.nsecs = USI_I2C_TIMEOUT_NS;
+	
+	now_fast(&usi_i2c_last_xfer);
 
 	USI_SET_BOTH_INPUT();
 	
@@ -96,8 +107,20 @@ void USI_I2C_Init(char address, struct UCI_ISC_Reg** regs, uint8_t num_regs) {
 	USISR = (1 << USISIF) | (1 << USIOIF) | (1 << USIPF) | (1 << USIDC);
 }
 
+// TODO: Make faster. Currently too slow, causes transactions to fail
 uint8_t USI_I2C_Busy() {
-	return usi_i2c_flags.busy;
+	struct timeval_t time;
+	struct timeval_t delta;
+	if(!usi_i2c_flags.busy) {
+		return 0;
+	}
+	now_fast(&time);
+	timedelta(&usi_i2c_last_xfer, &time, &delta);
+	if(timecmp(&delta, &usi_i2c_timeout) != LT) {
+		usi_i2c_flags.busy = 0;
+		return 0;
+	}
+	return 1;
 }
 
 /////////////////////////////////////////////////////////////////////////////////
@@ -135,8 +158,9 @@ ISR(USI_START_vect) {
     	USICR = USI_SLAVE_STOP_DID_OCCUR_USICR;
 		usi_i2c_flags.busy = 0;
 	}
-
+	
 	USISR = USI_SLAVE_CLEAR_START_USISR;
+	now_fast(&usi_i2c_last_xfer);
 }
 
 /////////////////////////////////////////////////////////////////////////////////
@@ -216,7 +240,7 @@ ISR(USI_OVF_vect) {
 				//more data.  Reset into START condition state
 				USICR = USI_SLAVE_SET_START_COND_USICR;
 				USISR = USI_SLAVE_SET_START_COND_USISR;
-				return;
+				goto out;
 			}
 			//else: fall through into SEND_DATA
 
@@ -282,4 +306,8 @@ ISR(USI_OVF_vect) {
 			USISR = USI_SLAVE_COUNT_ACK_USISR;
 			break;
 	}
+
+out:
+	now_fast(&usi_i2c_last_xfer);
+	return;
 }

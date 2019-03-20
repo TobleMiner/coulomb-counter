@@ -13,6 +13,7 @@
 #include <util/delay.h>
 #include <string.h>
 
+#include "time.h"
 #include "util.h"
 #include "usi_i2c_slave.h"
 
@@ -37,11 +38,6 @@ volatile int16_t adcs;
 
 int64_t current_uA;
 int16_t voltage_mV;
-
-struct timeval_t {
-	uint64_t secs;
-	uint64_t nsecs;
-};
 
 struct timeval_t past;
 struct timeval_t last_measure;
@@ -97,10 +93,6 @@ enum {
 	CLOCK_WDT,	
 };
 
-#define LT -1
-#define EQ  0
-#define GT  1
-
 #define ATOMIC_BEGIN do { cli();
 #define ATOMIC_END   sei(); } while(0);
 
@@ -115,6 +107,11 @@ void timeval_add_nsec(struct timeval_t* t, uint64_t nsecs) {
 		t->secs++;
 		t->nsecs -= SEC_NSECS;
 	}
+}
+
+
+void now_fast(struct timeval_t* t) {
+	*t = past;
 }
 
 void now(struct timeval_t* t) {
@@ -213,7 +210,18 @@ void set_time_source(uint8_t source) {
 	state.timesource = source;
 }
 
+void setup_adc() {
+	PRR &= ~BIT(PRADC);
+	ADCSRA |= BIT(ADEN);
+}
+
+void shutdown_adc() {
+	ADCSRA &= ~BIT(ADEN);
+	PRR |= BIT(PRADC);	
+}
+
 void adc_start_measure() {
+	setup_adc();
 	state.adc = ADC_STATE_I;
 	// Setup ADC for differential measurement
 	ADMUX  = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
@@ -247,6 +255,7 @@ void adc_process() {
 		reg_Ul.data = adc & 0xFF;
 		adc = 0;
 		update_uwh_count();
+		shutdown_adc();
 		state.adc = ADC_STATE_IDLE;
 	}
 }
