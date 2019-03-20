@@ -70,5 +70,6 @@ struct UCI_ISC_Reg {
 //USI I2C Initialize
 //  address - If slave, this parameter is the slave address
 void USI_I2C_Init(char address, struct UCI_ISC_Reg** regs, uint8_t num_regs);
+uint8_t USI_I2C_Busy();
 
 #endif

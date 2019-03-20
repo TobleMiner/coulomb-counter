@@ -39,6 +39,7 @@ uint8_t active_reg = 0;
 struct {
 	uint8_t reg_set:1;
 	uint8_t reg_read:1;
+	uint8_t busy:1;
 } usi_i2c_flags;
 
 enum {
@@ -95,6 +96,10 @@ void USI_I2C_Init(char address, struct UCI_ISC_Reg** regs, uint8_t num_regs) {
 	USISR = (1 << USISIF) | (1 << USIOIF) | (1 << USIPF) | (1 << USIDC);
 }
 
+uint8_t USI_I2C_Busy() {
+	return usi_i2c_flags.busy;
+}
+
 /////////////////////////////////////////////////////////////////////////////////
 // ISR USI_START_vect - USI Start Condition Detector Interrupt                 //
 //                                                                             //
@@ -124,10 +129,11 @@ ISR(USI_START_vect) {
 	{
 		// a Stop Condition did not occur
 		USICR = USI_SLAVE_STOP_NOT_OCCUR_USICR;
-
+		usi_i2c_flags.busy = 1;
 	} else {
 		// a Stop Condition did occur
     	USICR = USI_SLAVE_STOP_DID_OCCUR_USICR;
+		usi_i2c_flags.busy = 0;
 	}
 
 	USISR = USI_SLAVE_CLEAR_START_USISR;

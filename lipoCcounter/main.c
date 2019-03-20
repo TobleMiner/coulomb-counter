@@ -11,6 +11,7 @@
 #include <avr/interrupt.h>
 #include <avr/sleep.h>
 #include <util/delay.h>
+#include <string.h>
 
 #include "util.h"
 #include "usi_i2c_slave.h"
@@ -24,7 +25,11 @@
 #define TIMER_COUNTER_NS 64000UL
 #define SEC_NSECS 1000000000UL
 #define SEC_USECS 1000000UL
+#define TIMER1_LIMIT 125
+#define WDT_TICK_NS 125000000UL
+#define MEASURE_INTERVAL_NS 500000000UL
 
+#define ADC_CONVERSION_IN_PROGRESS (ADCSRA & BIT(ADSC))
 
 volatile uint16_t adc_cnt;
 volatile uint16_t adc;
@@ -62,6 +67,9 @@ struct UCI_ISC_Reg reg_uWsl;
 struct UCI_ISC_Reg reg_mWh; 
 struct UCI_ISC_Reg reg_mWl;
 
+struct UCI_ISC_Reg reg_uptimeh;
+struct UCI_ISC_Reg reg_uptimel;
+
 struct UCI_ISC_Reg* regs[] = {
 	&reg_Ih,
 	&reg_Il,
@@ -72,23 +80,62 @@ struct UCI_ISC_Reg* regs[] = {
 	&reg_uWsml,
 	&reg_uWsl,
 	&reg_mWh,
-	&reg_mWl
+	&reg_mWl,
+	&reg_uptimeh,
+	&reg_uptimel
 };
 
 enum {
-	ADC_STATE_I = 0,
+	ADC_STATE_IDLE = 0,
+	ADC_STATE_I,
 	ADC_STATE_U,
 };
 
-uint8_t adc_state = 0;
+enum {
+	CLOCK_NONE = 0,
+	CLOCK_TIMER,
+	CLOCK_WDT,	
+};
 
-void now(struct timeval_t* t) {
-	*t = past;
-	t->nsecs += TIMER_COUNTER_NS * TCNT1;
+#define LT -1
+#define EQ  0
+#define GT  1
+
+#define ATOMIC_BEGIN do { cli();
+#define ATOMIC_END   sei(); } while(0);
+
+struct {
+	uint8_t adc:2;
+	uint8_t timesource:2;
+} state;
+
+void timeval_add_nsec(struct timeval_t* t, uint64_t nsecs) {
+	t->nsecs += nsecs;
 	if(t->nsecs >= SEC_NSECS) {
 		t->secs++;
 		t->nsecs -= SEC_NSECS;
 	}
+}
+
+void now(struct timeval_t* t) {
+	*t = past;
+	timeval_add_nsec(t, TIMER_COUNTER_NS * TCNT1);
+}
+
+int8_t timecmp(struct timeval_t* a, struct timeval_t* b) {
+	if(a->secs > b->secs) {
+		return GT;
+	}
+	if(a->secs < b->secs) {
+		return LT;
+	}
+	if(a->nsecs > b->nsecs) {
+		return GT;
+	}
+	if(a->nsecs < b->nsecs) {
+		return LT;
+	}
+	return EQ;
 }
 
 void timedelta(struct timeval_t* pre, struct timeval_t* post, struct timeval_t* delta) {
@@ -122,65 +169,148 @@ void update_uwh_count() {
 	last_measure = current;
 }
 
-int main(void)
-{
-	// Init differential ADC
-	ADMUX  = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
-	ADCSRA = BIT(ADEN) | BIT(ADSC) | BIT(ADIE) | BIT(ADATE) | BIT(ADPS0) | BIT(ADPS1) | BIT(ADPS2);
-	ADCSRB = BIT(BIN);
-	DIDR0  = BIT(ADC2D) | BIT(ADC3D);
-	
+void setup_timer1()  {
+	PRR &= ~BIT(PRTIM1);
 	// Set up timer (CLKDIV /512, compare match)
-	TCCR1 = BIT(CTC1) | BIT(CS11) | BIT(CS13);
 	TIMSK = BIT(OCIE1A);
 	// One compare match interrupt each 8 ms
-	OCR1A = 125;
-/*
-	flags.adc = 0;
-	adc_cnt = 0;
-	adcs = 0;
-*/
+	OCR1A = TIMER1_LIMIT;
+	TCNT1 = 0;
+	TCCR1 = BIT(CTC1) | BIT(CS11) | BIT(CS13);
+}
+
+void shutdown_timer1() {
+	TCCR1 = 0;
+	PRR |= BIT(PRTIM1);
+}
+
+void setup_wdt() {
+	// Set up watchdog timer, ~8 interrupts per second
+	WDTCR = BIT(WDIE) | BIT(WDCE) | BIT(WDP1) | BIT(WDP0);	
+}
+
+void shutdown_wdt() {
+	WDTCR = BIT(WDCE);
+}
+
+void set_time_source(uint8_t source) {
+	if(source == state.timesource) {
+		return;
+	}
+	ATOMIC_BEGIN
+	switch(source) {
+		case CLOCK_TIMER:
+			shutdown_wdt();
+			// No recovery of partial WDT counter overflow possible, accuracy issue?
+			setup_timer1();
+			break;
+		case CLOCK_WDT:
+			shutdown_timer1();
+			now(&past);
+			setup_wdt();
+	}
+	ATOMIC_END
+	state.timesource = source;
+}
+
+void adc_start_measure() {
+	state.adc = ADC_STATE_I;
+	// Setup ADC for differential measurement
+	ADMUX  = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
+	ADCSRA = BIT(ADEN) | BIT(ADIE) | BIT(ADPS0) | BIT(ADPS1) | BIT(ADPS2);
+	ADCSRB = BIT(BIN);
+}
+
+void adc_process() {
+	int64_t tmp;
+	if(flags.adc_I) {
+		flags.adc_I = 0;
+		tmp = adcs;
+		tmp = tmp * REF_VOLTAGE * SHUNT_RESITANCE / CURRENT_GAIN / 512UL / ADC_SAMPLES;
+		current_uA = tmp;
+		tmp /= 10;
+		adcs = tmp;
+		reg_Ih.data = (adcs >> 8) & 0xFF;
+		reg_Il.data = adcs & 0xFF;
+		adcs = 0;
+		state.adc = ADC_STATE_U;
+		ADMUX  = BIT(MUX3) | BIT(MUX2);
+		ADCSRB = 0;
+	}
+	if(flags.adc_U) {
+		flags.adc_U = 0;
+		tmp = adc;
+		tmp = REF_VOLTAGE * 1024UL * ADC_SAMPLES / tmp;
+		voltage_mV = tmp;
+		adc = tmp;
+		reg_Uh.data = (adc >> 8) & 0xFF;
+		reg_Ul.data = adc & 0xFF;
+		adc = 0;
+		update_uwh_count();
+		state.adc = ADC_STATE_IDLE;
+	}
+}
+
+int main(void)
+{
+	uint8_t i;
+	
+	struct timeval_t next_measure;
+	next_measure.nsecs = 0;
+	next_measure.secs = 0;
+
+	past.nsecs = 0;
+	past.secs = 0;
+
+	// Disable input buffer on ADC pins
+	DIDR0  = BIT(ADC2D) | BIT(ADC3D);
+	
+	// Disable Timer 0 via PRR
+	PRR = BIT(PRTIM0);
+	
+	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
+		memset(regs[i], 0, sizeof(struct UCI_ISC_Reg));		
+	}
 	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
+
 	sei();
-    /* Replace with your application code */
-    while (1) 
-    {
-		int64_t tmp;
-		set_sleep_mode(SLEEP_MODE_IDLE);
+    while (1) {
+		struct timeval_t time;
+		// Actions
+		now(&time);
+		
+		// Update uptime
+		reg_uptimeh.data = (time.secs >> 8) & 0xFF;
+		reg_uptimel.data = time.secs & 0xFF;
+		
+		// Check if measurement is due
+		if(timecmp(&time, &next_measure) != LT && state.adc == ADC_STATE_IDLE) {
+			adc_start_measure();
+			next_measure = time;
+			timeval_add_nsec(&next_measure, MEASURE_INTERVAL_NS);
+		}
+		
+		// Sleep
+		if(USI_I2C_Busy()) {
+			set_time_source(CLOCK_TIMER);
+			/* According to appnote we should not need this?
+			ATOMIC_BEGIN
+			if(state.adc != ADC_STATE_IDLE && !ADC_CONVERSION_IN_PROGRESS) {
+				ADCSRA |= BIT(ADSC);
+			}
+			ATOMIC_END
+			*/
+			set_sleep_mode(SLEEP_MODE_IDLE);
+		} else {
+			set_time_source(CLOCK_WDT);
+			// We could probably go into an even deeper sleep mode if the ADC was not running
+			set_sleep_mode(SLEEP_MODE_ADC);
+		}
 		sleep_enable();
 		sleep_cpu();
-		if(flags.adc_I) {
-			flags.adc_I = 0;
-			tmp = adcs;
-			tmp = tmp * REF_VOLTAGE * SHUNT_RESITANCE / CURRENT_GAIN / 512UL / ADC_SAMPLES;
-			current_uA = tmp;
-			tmp /= 10;
-			adcs = tmp;
-			reg_Ih.data = (adcs >> 8) & 0xFF;
-			reg_Il.data = adcs & 0xFF;
-//			dU_millivolt = adcs / 20.0 * 1100.0 / 512.0 / ADC_SAMPLES;
-			adcs = 0;
-			adc_state = ADC_STATE_U;
-			ADMUX  = BIT(MUX3) | BIT(MUX2);
-			ADCSRB = 0;
-			ADCSRA |= BIT(ADATE) | BIT(ADSC);
-		}
-		if(flags.adc_U) {
-			flags.adc_U = 0;
-			tmp = adc;
-			tmp = REF_VOLTAGE * 1024UL * ADC_SAMPLES / tmp;
-			voltage_mV = tmp;
-			adc = tmp;
-			reg_Uh.data = (adc >> 8) & 0xFF;
-			reg_Ul.data = adc & 0xFF;
-			adc = 0;
-			update_uwh_count();
-			_delay_ms(500);
-			adc_state = ADC_STATE_I;
-			ADMUX  = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
-			ADCSRB = BIT(BIN);
-			ADCSRA |= BIT(ADATE) | BIT(ADSC);
-		}
+		
+		// Data processing
+		adc_process();
     }
 }
 
@@ -197,7 +327,7 @@ uint16_t adc_val() {
 }
 
 ISR(ADC_vect) {
-	switch(adc_state) {
+	switch(state.adc) {
 		case ADC_STATE_I:
 			adcs += adc_val_bipo();
 			adc_cnt++;
@@ -220,9 +350,9 @@ ISR(ADC_vect) {
 }
 
 ISR(TIMER1_COMPA_vect) {
-	past.nsecs += TIMER_TICK_NS;
-	if(past.nsecs >= SEC_NSECS) {
-		past.secs++;
-		past.nsecs -= SEC_NSECS;
-	}
+	timeval_add_nsec(&past, TIMER_TICK_NS);
+}
+
+ISR(WDT_vect) {
+	timeval_add_nsec(&past, WDT_TICK_NS);	
 }
