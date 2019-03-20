@@ -15,21 +15,112 @@
 #include "util.h"
 #include "usi_i2c_slave.h"
 
-#define ADC_SAMPLES 32
+#define ADC_SAMPLES 32UL
+#define SHUNT_RESITANCE 950UL
+#define CURRENT_GAIN 20UL
+#define REF_VOLTAGE 1100UL
+
+#define TIMER_TICK_NS 8000000UL 
+#define TIMER_COUNTER_NS 64000UL
+#define SEC_NSECS 1000000000UL
+#define SEC_USECS 1000000UL
+
 
 volatile uint16_t adc_cnt;
+volatile uint16_t adc;
 volatile int16_t adcs;
-double dU_millivolt;
+
+int64_t current_uA;
+int16_t voltage_mV;
+
+struct timeval_t {
+	uint64_t secs;
+	uint64_t nsecs;
+};
+
+struct timeval_t past;
+struct timeval_t last_measure;
+
+int32_t uwh_count;
 
 volatile struct {
-	uint8_t adc:1;
+	uint8_t adc_I:1;
+	uint8_t adc_U:1;
 } flags;
 
-struct UCI_ISC_Reg reg0;
+struct UCI_ISC_Reg reg_Ih;
+struct UCI_ISC_Reg reg_Il;
 
-struct UCI_ISC_Reg* regs[1] = {
-	&reg0,
+struct UCI_ISC_Reg reg_Uh;
+struct UCI_ISC_Reg reg_Ul;
+
+struct UCI_ISC_Reg reg_uWhh;
+struct UCI_ISC_Reg reg_uWhmh;
+struct UCI_ISC_Reg reg_uWhml;
+struct UCI_ISC_Reg reg_uWhl;
+
+struct UCI_ISC_Reg reg_mWh; 
+struct UCI_ISC_Reg reg_mWl;
+
+struct UCI_ISC_Reg* regs[] = {
+	&reg_Ih,
+	&reg_Il,
+	&reg_Uh,
+	&reg_Ul,
+	&reg_uWhh,
+	&reg_uWhmh,
+	&reg_uWhml,
+	&reg_uWhl,
+	&reg_mWh,
+	&reg_mWl
 };
+
+enum {
+	ADC_STATE_I = 0,
+	ADC_STATE_U,
+};
+
+uint8_t adc_state = 0;
+
+void now(struct timeval_t* t) {
+	*t = past;
+	t->nsecs += TIMER_COUNTER_NS * TCNT1;
+	if(t->nsecs >= SEC_NSECS) {
+		t->secs++;
+		t->nsecs -= SEC_NSECS;
+	}
+}
+
+void timedelta(struct timeval_t* pre, struct timeval_t* post, struct timeval_t* delta) {
+	delta->secs = post->secs - pre->secs;
+	if(pre->nsecs > post->nsecs) {
+		delta->secs--;
+		delta->nsecs = SEC_NSECS - (pre->nsecs - post->nsecs);
+	} else {
+		delta->nsecs = post->nsecs - pre->nsecs;		
+	}
+}
+
+void update_uwh_count() {
+	int32_t power_uW;
+	int32_t power_mW;
+	struct timeval_t current;
+	struct timeval_t delta;
+	now(&current);
+	timedelta(&last_measure, &current, &delta);
+	power_uW = voltage_mV * current_uA / 1000L;
+	power_mW = power_uW / (int32_t)1000L;
+	reg_mWh.data = (power_mW >> 8) & 0xFF;
+	reg_mWl.data = power_mW & 0xFF;
+
+	uwh_count += ((int64_t)delta.secs) * power_uW;
+	uwh_count += ((int64_t)delta.nsecs) * power_mW / ((int64_t)SEC_USECS);
+	reg_uWhh.data = (uwh_count >> 24) & 0xFF;
+	reg_uWhmh.data = (uwh_count >> 16) & 0xFF;
+	reg_uWhml.data = (uwh_count >> 8) & 0xFF;
+	reg_uWhl.data = (uwh_count >> 0) & 0xFF;
+	last_measure = current;
+}
 
 int main(void)
 {
@@ -38,6 +129,12 @@ int main(void)
 	ADCSRA = BIT(ADEN) | BIT(ADSC) | BIT(ADIE) | BIT(ADATE) | BIT(ADPS0) | BIT(ADPS1) | BIT(ADPS2);
 	ADCSRB = BIT(BIN);
 	DIDR0  = BIT(ADC2D) | BIT(ADC3D);
+	
+	// Set up timer (CLKDIV /512, compare match)
+	TCCR1 = BIT(CTC1) | BIT(CS11) | BIT(CS13);
+	TIMSK = BIT(OCIE1A);
+	// One compare match interrupt each 8 ms
+	OCR1A = 125;
 /*
 	flags.adc = 0;
 	adc_cnt = 0;
@@ -48,14 +145,41 @@ int main(void)
     /* Replace with your application code */
     while (1) 
     {
+		int64_t tmp;
 		set_sleep_mode(SLEEP_MODE_IDLE);
 		sleep_enable();
 		sleep_cpu();
-		if(flags.adc) {
-			flags.adc = 0;
-			dU_millivolt = adcs / 20.0 * 1100.0 / 512.0 / ADC_SAMPLES;
+		if(flags.adc_I) {
+			flags.adc_I = 0;
+			tmp = adcs;
+			tmp = tmp * REF_VOLTAGE * SHUNT_RESITANCE / CURRENT_GAIN / 512UL / ADC_SAMPLES;
+			current_uA = tmp;
+			tmp /= 10;
+			adcs = tmp;
+			reg_Ih.data = (adcs >> 8) & 0xFF;
+			reg_Il.data = adcs & 0xFF;
+//			dU_millivolt = adcs / 20.0 * 1100.0 / 512.0 / ADC_SAMPLES;
 			adcs = 0;
-//			ADCSRA |= BIT(ADATE) | BIT(ADSC);
+			adc_state = ADC_STATE_U;
+			ADMUX  = BIT(MUX3) | BIT(MUX2);
+			ADCSRB = 0;
+			ADCSRA |= BIT(ADATE) | BIT(ADSC);
+		}
+		if(flags.adc_U) {
+			flags.adc_U = 0;
+			tmp = adc;
+			tmp = REF_VOLTAGE * 1024UL * ADC_SAMPLES / tmp;
+			voltage_mV = tmp;
+			adc = tmp;
+			reg_Uh.data = (adc >> 8) & 0xFF;
+			reg_Ul.data = adc & 0xFF;
+			adc = 0;
+			update_uwh_count();
+			_delay_ms(500);
+			adc_state = ADC_STATE_I;
+			ADMUX  = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
+			ADCSRB = BIT(BIN);
+			ADCSRA |= BIT(ADATE) | BIT(ADSC);
 		}
     }
 }
@@ -68,12 +192,37 @@ int16_t adc_val_bipo() {
 	return raw;
 }
 
+uint16_t adc_val() {
+	return ADCL | (ADCH << 8);
+}
+
 ISR(ADC_vect) {
-	adcs += adc_val_bipo();
-	adc_cnt++;
-	if(adc_cnt >= ADC_SAMPLES) {
-		adc_cnt = 0;
-		flags.adc = 1;	
-		ADCSRA &= ~BIT(ADATE);
+	switch(adc_state) {
+		case ADC_STATE_I:
+			adcs += adc_val_bipo();
+			adc_cnt++;
+			if(adc_cnt >= ADC_SAMPLES) {
+				adc_cnt = 0;
+				flags.adc_I = 1;
+				ADCSRA &= ~BIT(ADATE);
+			}
+			break;
+		case ADC_STATE_U:
+			adc += adc_val();
+			adc_cnt++;
+			if(adc_cnt >= ADC_SAMPLES) {
+				adc_cnt = 0;
+				flags.adc_U = 1;
+				ADCSRA &= ~BIT(ADATE);
+			}
+			break;
+	}
+}
+
+ISR(TIMER1_COMPA_vect) {
+	past.nsecs += TIMER_TICK_NS;
+	if(past.nsecs >= SEC_NSECS) {
+		past.secs++;
+		past.nsecs -= SEC_NSECS;
 	}
 }
