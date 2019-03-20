@@ -1,3 +1,5 @@
+/* This file is subject to the MIT license */
+
 /*-----------------------------------------------------*\
 |  USI I2C Slave Driver                                 |
 |                                                       |
@@ -13,6 +15,8 @@
 |                                                       |
 | Adam Honse (GitHub: CalcProgrammer1) - 7/29/2012      |
 |            -calcprogrammer1@gmail.com                 |
+| Tobias Schramm (GitHub: TobleMiner) - 3/20/2019       |
+|            -tobleminer@gmail.com                      |
 \*-----------------------------------------------------*/
 #ifndef USI_I2C_SLAVE_H
 #define USI_I2C_SLAVE_H
