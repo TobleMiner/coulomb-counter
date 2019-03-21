@@ -99,6 +99,10 @@ void USI_I2C_Init(char address, struct UCI_ISC_Reg** regs, uint8_t num_regs) {
 	usi_i2c_timeout.secs = 0;
 	usi_i2c_timeout.nsecs = USI_I2C_TIMEOUT_NS;
 	
+	usi_i2c_flags.busy = 0;
+	usi_i2c_flags.reg_read = 0;
+	usi_i2c_flags.reg_set = 0;
+
 	now_fast(&usi_i2c_last_xfer);
 
 	USI_SET_BOTH_INPUT();
