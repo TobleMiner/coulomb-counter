@@ -22,6 +22,8 @@
 #define CURRENT_GAIN 20UL
 #define REF_VOLTAGE 1100UL
 
+#define CUTOFF_MV 2900UL
+
 #define TIMER_TICK_NS 8000000UL 
 #define TIMER_COUNTER_NS 64000UL
 #define SEC_NSECS 1000000000UL
@@ -30,8 +32,51 @@
 #define WDT_TICK_NS 125000000UL
 #define MEASURE_INTERVAL_NS 500000000UL
 
+struct {
+	uint64_t tick_ns;
+	uint64_t counter_ns;
+} timer1_cal;
+
+struct {
+	uint64_t tick_ns;
+} wdt_cal;
+
 #define ADC_CONVERSION_IN_PROGRESS (ADCSRA & BIT(ADSC))
 #define ADC_CONVERSION_IS_BIPOLAR (ADCSRB & BIT(BIN))
+
+#define DEBUG_LO (PORTB &= ~BIT(PB1))
+#define DEBUG_HI (PORTB |= BIT(PB1))
+#define DEBUG_BLIP do { DEBUG_HI; asm("nop\n"); DEBUG_LO; } while(0)
+
+#define REG64_CHANGED(reg) (\
+	(reg##_56)->attr.changed &&\
+	(reg##_48)->attr.changed &&\
+	(reg##_40)->attr.changed &&\
+	(reg##_32)->attr.changed &&\
+	(reg##_24)->attr.changed &&\
+	(reg##_16)->attr.changed &&\
+	(reg##_8)->attr.changed &&\
+	(reg##_0)->attr.changed)
+
+#define REG64_READ(reg) (\
+	((uint64_t)(reg##_0)->data) |\
+	(((uint64_t)(reg##_8)->data) << 8) |\
+	(((uint64_t)(reg##_16)->data) << 16) |\
+	(((uint64_t)(reg##_24)->data) << 24) |\
+	(((uint64_t)(reg##_32)->data) << 32) |\
+	(((uint64_t)(reg##_40)->data) << 40) |\
+	(((uint64_t)(reg##_48)->data) << 48) |\
+	(((uint64_t)(reg##_56)->data) << 56))
+
+#define REG64_WRITE(reg, val) do {\
+	(reg##_0)->data = val & 0xFF;\
+	(reg##_8)->data = (val >> 8) & 0xFF;\
+	(reg##_16)->data = (val >> 16) & 0xFF;\
+	(reg##_24)->data = (val >> 24) & 0xFF;\
+	(reg##_32)->data = (val >> 32) & 0xFF;\
+	(reg##_40)->data = (val >> 40) & 0xFF;\
+	(reg##_48)->data = (val >> 48) & 0xFF;\
+	(reg##_56)->data = (val >> 56) & 0xFF; } while(0)
 
 volatile uint16_t adc_cnt;
 volatile uint16_t adc;
@@ -52,27 +97,50 @@ volatile struct {
 	uint8_t adc_U:1;
 } flags;
 
-struct UCI_ISC_Reg reg_Ih;
-struct UCI_ISC_Reg reg_Il;
+struct USI_I2C_Reg reg_Ih;
+struct USI_I2C_Reg reg_Il;
 
-struct UCI_ISC_Reg reg_Uh;
-struct UCI_ISC_Reg reg_Ul;
+struct USI_I2C_Reg reg_Uh;
+struct USI_I2C_Reg reg_Ul;
 
-struct UCI_ISC_Reg reg_uWsh;
-struct UCI_ISC_Reg reg_uWsmh;
-struct UCI_ISC_Reg reg_uWsml;
-struct UCI_ISC_Reg reg_uWsl;
+struct USI_I2C_Reg reg_uWsh;
+struct USI_I2C_Reg reg_uWsmh;
+struct USI_I2C_Reg reg_uWsml;
+struct USI_I2C_Reg reg_uWsl;
 
-struct UCI_ISC_Reg reg_mWh; 
-struct UCI_ISC_Reg reg_mWl;
+struct USI_I2C_Reg reg_mWh; 
+struct USI_I2C_Reg reg_mWl;
 
-struct UCI_ISC_Reg reg_uptimeh;
-struct UCI_ISC_Reg reg_uptimel;
+struct USI_I2C_Reg reg_uptimeh;
+struct USI_I2C_Reg reg_uptimel;
 
-struct UCI_ISC_Reg reg_adc_calh;
-struct UCI_ISC_Reg reg_adc_call;
+struct USI_I2C_Reg reg_adc_calh;
+struct USI_I2C_Reg reg_adc_call;
 
-struct UCI_ISC_Reg* regs[] = {
+enum {
+	CALIBRATE_NONE = 0,
+	// Calibration of timer1 should be done regularly since 
+	// internal RC oscillator is highly temperature dependent
+	CALIBRATE_TIMER1,
+	// WDT calibration should be performed at start but is 
+	// less critical after that since it depends mainly on
+	// supply voltage
+	CALIBRATE_WDT
+};
+
+struct USI_I2C_Reg reg_cal_flags;
+
+// IMPORTANT: All registers must be written to for calibration!
+struct USI_I2C_Reg reg_cal_56;
+struct USI_I2C_Reg reg_cal_48;
+struct USI_I2C_Reg reg_cal_40;
+struct USI_I2C_Reg reg_cal_32;
+struct USI_I2C_Reg reg_cal_24;
+struct USI_I2C_Reg reg_cal_16;
+struct USI_I2C_Reg reg_cal_8;
+struct USI_I2C_Reg reg_cal_0;
+
+struct USI_I2C_Reg* regs[] = {
 	&reg_Ih,
 	&reg_Il,
 	&reg_Uh,
@@ -87,6 +155,21 @@ struct UCI_ISC_Reg* regs[] = {
 	&reg_uptimel,
 	&reg_adc_calh,
 	&reg_adc_call,
+	&reg_cal_flags, // 14
+	&reg_cal_56,    // 15
+	&reg_cal_48,    // 16
+	&reg_cal_40,    // 17
+	&reg_cal_32,    // 18
+	&reg_cal_24,    // 19
+	&reg_cal_16,    // 20
+	&reg_cal_8,     // 21
+	&reg_cal_0,     // 22
+};
+
+enum {
+	MEASURE_BIPOL_CAL = 0,
+	MEASURE_CURRENT,
+	MEASURE_VOLTAGE,
 };
 
 enum {
@@ -125,7 +208,7 @@ void now_fast(struct timeval_t* t) {
 
 void now(struct timeval_t* t) {
 	*t = past;
-	timeval_add_nsec(t, TIMER_COUNTER_NS * TCNT1);
+	timeval_add_nsec(t, timer1_cal.counter_ns * TCNT1);
 }
 
 int8_t timecmp(struct timeval_t* a, struct timeval_t* b) {
@@ -152,6 +235,12 @@ void timedelta(struct timeval_t* pre, struct timeval_t* post, struct timeval_t* 
 	} else {
 		delta->nsecs = post->nsecs - pre->nsecs;		
 	}
+}
+
+uint64_t timedelta_ns(struct timeval_t* pre, struct timeval_t* post) {
+	struct timeval_t delta;
+	timedelta(pre, post, &delta);
+	return SEC_NSECS * delta.secs + delta.nsecs;
 }
 
 void update_uwh_count() {
@@ -277,6 +366,8 @@ void adc_process() {
 	}
 }
 
+#define TIMER1_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_TIMER1)
+
 int main(void)
 {
 	uint8_t i;
@@ -287,15 +378,28 @@ int main(void)
 
 	past.nsecs = 0;
 	past.secs = 0;
+	
+	state.timesource = CLOCK_NONE;
+	state.adc = ADC_STATE_IDLE;
+	
+	timer1_cal.counter_ns = TIMER_COUNTER_NS;
+	timer1_cal.tick_ns = TIMER_TICK_NS;
+	
+	wdt_cal.tick_ns = WDT_TICK_NS;
+	
+	struct timeval_t clock_cal_start;
 
 	// Disable input buffer on ADC pins
-	DIDR0  = BIT(ADC2D) | BIT(ADC3D);
+	DIDR0 = BIT(ADC2D) | BIT(ADC3D);
+	
+	// Enable debug IO
+	DDRB |= BIT(PINB1);
 	
 	// Disable Timer 0 via PRR
 	PRR = BIT(PRTIM0);
 	
 	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
-		memset(regs[i], 0, sizeof(struct UCI_ISC_Reg));		
+		memset(regs[i], 0, sizeof(struct USI_I2C_Reg));		
 	}
 	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
 
@@ -318,7 +422,8 @@ int main(void)
 		}
 		
 		// Sleep
-		if(USI_I2C_Busy()) {
+		// USI counter overflows wake the controller up from IDLE only
+		if(USI_I2C_Busy() || TIMER1_CAL_IN_PROGRESS) {
 			set_time_source(CLOCK_TIMER);
 			sleep_mode = SLEEP_MODE_IDLE;
 		} else {
@@ -328,10 +433,40 @@ int main(void)
 				sleep_mode = SLEEP_MODE_ADC;
 			}
 		}
+		if(sleep_mode == SLEEP_MODE_PWR_DOWN) {
+			DEBUG_HI;
+		}
 		set_sleep_mode(sleep_mode);
 		sleep_enable();
 		sleep_cpu();
+		DEBUG_LO;
 		
+		// Process calibration requests
+		ATOMIC_BEGIN
+		if(TIMER1_CAL_IN_PROGRESS) {
+			if(reg_cal_flags.attr.changed) {
+				now(&clock_cal_start);
+			}
+			// Ouch, this block will need a LOT of CPU time
+			if(REG64_CHANGED(&reg_cal)) {
+				DEBUG_BLIP;
+				uint64_t delta_local;
+				uint64_t delta_cal;
+				struct timeval_t cal_end;
+				now(&cal_end);
+				reg_cal_flags.data = CALIBRATE_NONE;
+				// Reduce resolution to us to allow for longer calibration runs
+				delta_local = timedelta_ns(&clock_cal_start, &cal_end) / 1000;
+				delta_cal = REG64_READ(&reg_cal) / 1000;
+				timer1_cal.counter_ns = (timer1_cal.counter_ns * delta_cal) / delta_local;
+				timer1_cal.tick_ns = (timer1_cal.tick_ns * delta_cal) / delta_local;
+				REG64_WRITE(&reg_cal, 0ULL);
+				DEBUG_BLIP;
+			}
+			reg_cal_flags.attr.changed = 0;
+		}
+		ATOMIC_END
+
 		// Data processing
 		adc_process();
 	}
@@ -372,9 +507,9 @@ ISR(ADC_vect) {
 }
 
 ISR(TIMER1_COMPA_vect) {
-	timeval_add_nsec(&past, TIMER_TICK_NS);
+	timeval_add_nsec(&past, timer1_cal.tick_ns);
 }
 
 ISR(WDT_vect) {
-	timeval_add_nsec(&past, WDT_TICK_NS);	
+	timeval_add_nsec(&past, wdt_cal.tick_ns);	
 }
