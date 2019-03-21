@@ -60,9 +60,9 @@
     #define PIN_USI_SCL         PINB7
 #endif
 
-struct UCI_ISC_Reg;
+struct USI_I2C_Reg;
 
-struct UCI_ISC_Reg {
+struct USI_I2C_Reg {
 	struct {
 		uint8_t changed:1;
 	} attr;
@@ -71,7 +71,7 @@ struct UCI_ISC_Reg {
 
 //USI I2C Initialize
 //  address - If slave, this parameter is the slave address
-void USI_I2C_Init(char address, struct UCI_ISC_Reg** regs, uint8_t num_regs);
+void USI_I2C_Init(char address, struct USI_I2C_Reg** regs, uint8_t num_regs);
 //void USI_I2C_Set_Timeout(struct timeval_t* timeout);
 uint8_t USI_I2C_Busy();
 

@@ -32,7 +32,7 @@ struct timeval_t usi_i2c_timeout;
 struct timeval_t usi_i2c_last_xfer;
 
 uint8_t usi_i2c_num_regs;
-struct UCI_ISC_Reg** usi_i2c_regs;
+struct USI_I2C_Reg** usi_i2c_regs;
 uint8_t active_reg = 0;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -86,7 +86,7 @@ enum {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void USI_I2C_Init(char address, struct UCI_ISC_Reg** regs, uint8_t num_regs) {
+void USI_I2C_Init(char address, struct USI_I2C_Reg** regs, uint8_t num_regs) {
 	usi_i2c_flags.reg_set = 0;
 	
 	PORT_USI &= ~(1 << PORT_USI_SCL);
