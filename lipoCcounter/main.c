@@ -208,7 +208,9 @@ void now_fast(struct timeval_t* t) {
 
 void now(struct timeval_t* t) {
 	*t = past;
-	timeval_add_nsec(t, timer1_cal.counter_ns * TCNT1);
+	if(state.timesource == CLOCK_TIMER) {
+		timeval_add_nsec(t, timer1_cal.counter_ns * TCNT1);
+	}
 }
 
 int8_t timecmp(struct timeval_t* a, struct timeval_t* b) {
@@ -271,7 +273,7 @@ void setup_timer1()  {
 	// One compare match interrupt each 8 ms
 	OCR1A = TIMER1_LIMIT;
 	TCNT1 = 0;
-	TCCR1 = BIT(CTC1) | BIT(CS11) | BIT(CS13);
+	TCCR1 = BIT(CTC1) | BIT(CS10) | BIT(CS13);
 }
 
 void shutdown_timer1() {
@@ -367,6 +369,11 @@ void adc_process() {
 }
 
 #define TIMER1_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_TIMER1)
+#define WDT_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_WDT)
+#define CLOCK_CAL_IN_PROGRESS (TIMER1_CAL_IN_PROGRESS || WDT_CAL_IN_PROGRESS)
+#define LAST_CAL_TIMER1 (last_cal == CALIBRATE_TIMER1)
+#define LAST_CAL_WDT (last_cal == CALIBRATE_WDT)
+#define LAST_CAL_CLOCK (LAST_CAL_TIMER1 || LAST_CAL_WDT)
 
 int main(void)
 {
@@ -388,6 +395,7 @@ int main(void)
 	wdt_cal.tick_ns = WDT_TICK_NS;
 	
 	struct timeval_t clock_cal_start;
+	uint8_t last_cal = CALIBRATE_NONE;
 
 	// Disable input buffer on ADC pins
 	DIDR0 = BIT(ADC2D) | BIT(ADC3D);
@@ -416,6 +424,7 @@ int main(void)
 		
 		// Check if measurement is due
 		if(timecmp(&time, &next_measure) != LT && state.adc == ADC_STATE_IDLE) {
+			DEBUG_BLIP;
 			adc_start_measure();
 			next_measure = time;
 			timeval_add_nsec(&next_measure, MEASURE_INTERVAL_NS);
@@ -434,37 +443,41 @@ int main(void)
 			}
 		}
 		if(sleep_mode == SLEEP_MODE_PWR_DOWN) {
-			DEBUG_HI;
+			//DEBUG_HI;
 		}
 		set_sleep_mode(sleep_mode);
 		sleep_enable();
 		sleep_cpu();
-		DEBUG_LO;
+//		DEBUG_LO;
 		
 		// Process calibration requests
 		ATOMIC_BEGIN
-		if(TIMER1_CAL_IN_PROGRESS) {
+		if(CLOCK_CAL_IN_PROGRESS) {
 			if(reg_cal_flags.attr.changed) {
 				now(&clock_cal_start);
 			}
-			// Ouch, this block will need a LOT of CPU time
-			if(REG64_CHANGED(&reg_cal)) {
-				DEBUG_BLIP;
-				uint64_t delta_local;
-				uint64_t delta_cal;
-				struct timeval_t cal_end;
-				now(&cal_end);
-				reg_cal_flags.data = CALIBRATE_NONE;
-				// Reduce resolution to us to allow for longer calibration runs
-				delta_local = timedelta_ns(&clock_cal_start, &cal_end) / 1000;
-				delta_cal = REG64_READ(&reg_cal) / 1000;
+		}
+		else if (LAST_CAL_CLOCK) {
+			DEBUG_BLIP;
+			uint64_t delta_local;
+			uint64_t delta_cal;
+			struct timeval_t cal_end;
+			now(&cal_end);
+			// Reduce resolution to us to allow for longer calibration runs
+			delta_local = timedelta_ns(&clock_cal_start, &cal_end) / 1000;
+			delta_cal = REG64_READ(&reg_cal) / 1000;
+			if(LAST_CAL_TIMER1) {
 				timer1_cal.counter_ns = (timer1_cal.counter_ns * delta_cal) / delta_local;
 				timer1_cal.tick_ns = (timer1_cal.tick_ns * delta_cal) / delta_local;
-				REG64_WRITE(&reg_cal, 0ULL);
-				DEBUG_BLIP;
 			}
-			reg_cal_flags.attr.changed = 0;
+			else if(LAST_CAL_WDT) {
+				wdt_cal.tick_ns = (wdt_cal.tick_ns * delta_cal) / delta_local;
+			}
+			REG64_WRITE(&reg_cal, 0ULL);
+			DEBUG_BLIP;
 		}
+		reg_cal_flags.attr.changed = 0;
+		last_cal = reg_cal_flags.data;
 		ATOMIC_END
 
 		// Data processing
