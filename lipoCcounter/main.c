@@ -428,9 +428,9 @@ int main(void)
 			sleep_mode = SLEEP_MODE_IDLE;
 		} else {
 			set_time_source(CLOCK_WDT);
-			sleep_mode = SLEEP_MODE_PWR_DOWN;
+			sleep_mode = SLEEP_MODE_ADC;
 			if(state.adc == ADC_STATE_IDLE) {
-				sleep_mode = SLEEP_MODE_ADC;
+				sleep_mode = SLEEP_MODE_PWR_DOWN;
 			}
 		}
 		if(sleep_mode == SLEEP_MODE_PWR_DOWN) {
