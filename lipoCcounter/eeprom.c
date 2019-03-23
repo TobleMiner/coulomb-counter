@@ -30,6 +30,7 @@ static void inc_log() {
 	log_block.data.serial++;
 }
 
+// For some bizarre reason eeprom_read_block reads data backwards...
 static void eeprom_read_block_8(void* dst, void* src, uint8_t len) {
 	while(len--) {
 		*((unsigned char*)dst++) = eeprom_read_byte(src++);
@@ -88,6 +89,7 @@ ISR(EE_RDY_vect) {
 		// Enqueue next byte
 		eeprom_write_next_byte();
 	} else {
+		// Transfer finished, disable interrupts and increment serial
 		EECR &= ~BIT(EERIE);
 		inc_log();
 	}
