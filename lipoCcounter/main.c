@@ -97,6 +97,16 @@ volatile struct {
 	uint8_t adc_U:1;
 } flags;
 
+#define REG64(name) \
+	struct USI_I2C_Reg name##_56;\
+	struct USI_I2C_Reg name##_48;\
+	struct USI_I2C_Reg name##_40;\
+	struct USI_I2C_Reg name##_32;\
+	struct USI_I2C_Reg name##_24;\
+	struct USI_I2C_Reg name##_16;\
+	struct USI_I2C_Reg name##_8;\
+	struct USI_I2C_Reg name##_0;
+
 struct USI_I2C_Reg reg_Ih;
 struct USI_I2C_Reg reg_Il;
 
@@ -130,15 +140,7 @@ enum {
 
 struct USI_I2C_Reg reg_cal_flags;
 
-// IMPORTANT: All registers must be written to for calibration!
-struct USI_I2C_Reg reg_cal_56;
-struct USI_I2C_Reg reg_cal_48;
-struct USI_I2C_Reg reg_cal_40;
-struct USI_I2C_Reg reg_cal_32;
-struct USI_I2C_Reg reg_cal_24;
-struct USI_I2C_Reg reg_cal_16;
-struct USI_I2C_Reg reg_cal_8;
-struct USI_I2C_Reg reg_cal_0;
+REG64(reg_cal);
 
 struct USI_I2C_Reg* regs[] = {
 	&reg_Ih,
