@@ -12,10 +12,12 @@
 #include <avr/sleep.h>
 #include <util/delay.h>
 #include <string.h>
+#include <avr/eeprom.h>
 
 #include "time.h"
 #include "util.h"
 #include "usi_i2c_slave.h"
+#include "eeprom.h"
 
 #define ADC_SAMPLES 32UL
 #define SHUNT_RESITANCE 950UL
@@ -31,6 +33,7 @@
 #define TIMER1_LIMIT 125
 #define WDT_TICK_NS 125000000UL
 #define MEASURE_INTERVAL_NS 500000000UL
+#define LOG_INTERVAL_SEC 60UL
 
 struct {
 	uint64_t tick_ns;
@@ -91,6 +94,8 @@ struct timeval_t last_measure;
 
 int32_t uws_count;
 
+extern struct eeprom_log_block log_block;
+
 volatile struct {
 	uint8_t adc_cal:1;
 	uint8_t adc_I:1;
@@ -142,6 +147,8 @@ struct USI_I2C_Reg reg_cal_flags;
 
 REG64(reg_cal);
 
+struct USI_I2C_Reg reg_output;
+
 struct USI_I2C_Reg* regs[] = {
 	&reg_Ih,
 	&reg_Il,
@@ -166,6 +173,7 @@ struct USI_I2C_Reg* regs[] = {
 	&reg_cal_16,    // 20
 	&reg_cal_8,     // 21
 	&reg_cal_0,     // 22
+	&reg_output,    // 23
 };
 
 enum {
@@ -193,7 +201,28 @@ enum {
 struct {
 	uint8_t adc:2;
 	uint8_t timesource:2;
+	uint8_t output_on:1;
 } state;
+
+//#define INVERT_OUTPUT
+
+void output_on() {
+	state.output_on = 1;
+#ifndef INVERT_OUTPUT
+	PORTB |= BIT(PINB2);
+#else
+	PORTB &= ~BIT(PINB2);
+#endif
+}
+
+void output_off() {
+	state.output_on = 0;
+#ifndef INVERT_OUTPUT
+	PORTB &= ~BIT(PINB2);
+#else
+	PORTB |= BIT(PINB2);
+#endif
+}
 
 void timeval_add_nsec(struct timeval_t* t, uint64_t nsecs) {
 	t->nsecs += nsecs;
@@ -201,6 +230,10 @@ void timeval_add_nsec(struct timeval_t* t, uint64_t nsecs) {
 		t->secs++;
 		t->nsecs -= SEC_NSECS;
 	}
+}
+
+void timeval_add_sec(struct timeval_t* t, uint64_t secs) {
+	t->secs += secs;
 }
 
 
@@ -377,6 +410,9 @@ void adc_process() {
 #define LAST_CAL_WDT (last_cal == CALIBRATE_WDT)
 #define LAST_CAL_CLOCK (LAST_CAL_TIMER1 || LAST_CAL_WDT)
 
+#define ADC_IDLE (state.adc == ADC_STATE_IDLE)
+#define OUTPUT_ON (state.output_on)
+
 int main(void)
 {
 	uint8_t i;
@@ -384,6 +420,10 @@ int main(void)
 	struct timeval_t next_measure;
 	next_measure.nsecs = 0;
 	next_measure.secs = 0;
+
+	struct timeval_t next_log_write;
+	next_log_write.nsecs = 0;
+	next_log_write.secs = LOG_INTERVAL_SEC;
 
 	past.nsecs = 0;
 	past.secs = 0;
@@ -402,11 +442,31 @@ int main(void)
 	// Disable input buffer on ADC pins
 	DIDR0 = BIT(ADC2D) | BIT(ADC3D);
 	
-	// Enable debug IO
+	// Enable power switch IO
+	output_on();
 	DDRB |= BIT(PINB1);
 	
 	// Disable Timer 0 via PRR
 	PRR = BIT(PRTIM0);
+	
+	// Initialize eeprom log writer
+	eeprom_init();
+	
+	// Read last log block
+	if(eeprom_find_log_block()) {
+		state.output_on = log_block.data.flags.output_on;
+		if(state.output_on) {
+			output_on();
+			} else {
+			output_off();
+		}
+	} else {
+		// No valid log block found, write one
+		eeprom_write_log_block();
+	}
+	
+	// Load data from log block
+	uws_count = log_block.data.uWs;
 	
 	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
 		memset(regs[i], 0, sizeof(struct USI_I2C_Reg));		
@@ -424,12 +484,20 @@ int main(void)
 		reg_uptimeh.data = (time.secs >> 8) & 0xFF;
 		reg_uptimel.data = time.secs & 0xFF;
 		
-		// Check if measurement is due
-		if(timecmp(&time, &next_measure) != LT && state.adc == ADC_STATE_IDLE) {
-			DEBUG_BLIP;
+		// Check if measurement is due, schedule only if output is on
+		if(timecmp(&time, &next_measure) != LT && ADC_IDLE && OUTPUT_ON) {
 			adc_start_measure();
 			next_measure = time;
 			timeval_add_nsec(&next_measure, MEASURE_INTERVAL_NS);
+		}
+
+		// Check if we should write a log entry
+		if(timecmp(&time, &next_log_write) != LT && !eeprom_busy()) {
+			log_block.data.flags.output_on = state.output_on;
+			log_block.data.uWs = uws_count;
+			eeprom_write_log_block();
+			next_log_write = time;
+			timeval_add_sec(&next_log_write, LOG_INTERVAL_SEC);
 		}
 		
 		// Sleep
@@ -440,17 +508,14 @@ int main(void)
 		} else {
 			set_time_source(CLOCK_WDT);
 			sleep_mode = SLEEP_MODE_ADC;
-			if(state.adc == ADC_STATE_IDLE) {
+			if(ADC_IDLE && !eeprom_busy()) {
 				sleep_mode = SLEEP_MODE_PWR_DOWN;
 			}
 		}
-		if(sleep_mode == SLEEP_MODE_PWR_DOWN) {
-			//DEBUG_HI;
-		}
+		
 		set_sleep_mode(sleep_mode);
 		sleep_enable();
 		sleep_cpu();
-//		DEBUG_LO;
 		
 		// Process calibration requests
 		ATOMIC_BEGIN
@@ -460,7 +525,6 @@ int main(void)
 			}
 		}
 		else if (LAST_CAL_CLOCK) {
-			DEBUG_BLIP;
 			uint64_t delta_local;
 			uint64_t delta_cal;
 			struct timeval_t cal_end;
@@ -476,11 +540,13 @@ int main(void)
 				wdt_cal.tick_ns = (wdt_cal.tick_ns * delta_cal) / delta_local;
 			}
 			REG64_WRITE(&reg_cal, 0ULL);
-			DEBUG_BLIP;
 		}
 		reg_cal_flags.attr.changed = 0;
 		last_cal = reg_cal_flags.data;
 		ATOMIC_END
+		
+		// Process power-up/power-down requests
+		
 
 		// Data processing
 		adc_process();
