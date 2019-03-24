@@ -12,11 +12,18 @@ uint16_t write_addr;
 
 #define LOG_ENTRY_LEN (sizeof(struct eeprom_log_block))
 #define LOG_DATA_LEN (sizeof(struct eeprom_log_data))
+#define DEV_DATA_LEN (sizeof(struct eeprom_device_block))
+
+#define LOG_ENTRIES ((EEPROM_SIZE - sizeof(struct eeprom_device_block)) / LOG_ENTRY_LEN)
 
 EEMEM struct eeprom_device_block devicedata;
-EEMEM struct eeprom_log_block logdata[((EEPROM_SIZE - sizeof(struct eeprom_device_block)) / LOG_ENTRY_LEN)];
+EEMEM struct eeprom_log_block logdata[LOG_ENTRIES];
 
-struct eeprom_log_block log_block;
+
+static struct eeprom_log_block log_block;
+
+struct eeprom_log_data log_data;
+struct eeprom_device_block dev_block;
 
 void eeprom_init() {
 	next_log_entry = 0;
@@ -51,6 +58,7 @@ uint8_t eeprom_find_log_block() {
 		if(eeprom_read_log_block(&log, entry)) {
 			if(log.data.serial >= max_serial) {
 				log_block = log;
+				log_data = log_block.data;
 				next_log_entry = entry;
 				inc_log();
 				found = 1;
@@ -59,6 +67,10 @@ uint8_t eeprom_find_log_block() {
 		entry++;
 	}
 	return found;
+}
+
+void eeprom_read_device_block() {
+	eeprom_read_block_8(&dev_block, &devicedata, DEV_DATA_LEN);
 }
 
 uint8_t eeprom_busy() {
@@ -74,6 +86,7 @@ void eeprom_write_next_byte() {
 }
 
 void eeprom_write_log_block() {
+	log_block.data = log_data;
 	write_addr = (uint16_t)&logdata[next_log_entry];
 	write_len = LOG_ENTRY_LEN;
 	write_data = (unsigned char*)&log_block;
