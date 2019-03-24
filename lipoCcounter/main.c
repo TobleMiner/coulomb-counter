@@ -24,16 +24,18 @@
 #define CURRENT_GAIN 20UL
 #define REF_VOLTAGE 1100UL
 
-#define CUTOFF_MV 2900UL
-
 #define TIMER_TICK_NS 8000000UL 
 #define TIMER_COUNTER_NS 64000UL
 #define SEC_NSECS 1000000000UL
 #define SEC_USECS 1000000UL
 #define TIMER1_LIMIT 125
 #define WDT_TICK_NS 125000000UL
-#define MEASURE_INTERVAL_NS 500000000UL
+#define MEASURE_INTERVAL_ACTIVE_NS  100000000UL // Each 100 ms
+// Occasional wakeup is also important while passive since attaching of a charger must be detected
+#define MEASURE_INTERVAL_PASSIVE_NS 5000000000UL // Each 5000 ms
 #define LOG_INTERVAL_SEC 60UL
+#define EPSILON_CHARGE_UA 1000UL
+#define EPSILON_CHARGE (EPSILON_CHARGE_UA * CURRENT_GAIN * 512UL * ADC_SAMPLES / (REF_VOLTAGE * SHUNT_RESITANCE))
 
 struct {
 	uint64_t tick_ns;
@@ -85,6 +87,7 @@ volatile uint16_t adc_cnt;
 volatile uint16_t adc;
 volatile int16_t adcs;
 volatile int16_t adc_diff_cal;
+volatile int16_t adc_shunt_cal;
 
 int64_t current_uA;
 int16_t voltage_mV;
@@ -94,7 +97,9 @@ struct timeval_t last_measure;
 
 int32_t uws_count;
 
-extern struct eeprom_log_block log_block;
+extern struct eeprom_log_data log_data;
+extern struct eeprom_device_block dev_block;
+
 
 volatile struct {
 	uint8_t adc_cal:1;
@@ -202,6 +207,7 @@ struct {
 	uint8_t adc:2;
 	uint8_t timesource:2;
 	uint8_t output_on:1;
+	uint8_t charging:1;
 } state;
 
 //#define INVERT_OUTPUT
@@ -209,19 +215,28 @@ struct {
 void output_on() {
 	state.output_on = 1;
 #ifndef INVERT_OUTPUT
-	PORTB |= BIT(PINB2);
+	PORTB |= BIT(PINB1);
 #else
-	PORTB &= ~BIT(PINB2);
+	PORTB &= ~BIT(PINB1);
 #endif
 }
 
 void output_off() {
 	state.output_on = 0;
 #ifndef INVERT_OUTPUT
-	PORTB &= ~BIT(PINB2);
+	PORTB &= ~BIT(PINB1);
 #else
-	PORTB |= BIT(PINB2);
+	PORTB |= BIT(PINB1);
 #endif
+}
+
+void set_output_state(uint8_t val) {
+	if(val) {
+		output_on();
+	} else {
+		output_off();
+	}
+	reg_output.data = val;
 }
 
 void timeval_add_nsec(struct timeval_t* t, uint64_t nsecs) {
@@ -364,8 +379,11 @@ void adc_start_measure() {
 	ADCSRB = BIT(BIN);
 }
 
-void adc_process() {
+#define DEVICE_ACTIVE (state.output_on || state.charging)
+
+uint8_t adc_process() {
 	int64_t tmp;
+	// TODO: We don't need this anymore. Use shunt calibration values directly.
 	if(flags.adc_cal) {
 		flags.adc_cal = 0;
 		adc_diff_cal = adcs;
@@ -376,17 +394,26 @@ void adc_process() {
 	}
 	if(flags.adc_I) {
 		flags.adc_I = 0;
-		tmp = adcs - adc_diff_cal;
-		tmp = tmp * REF_VOLTAGE * SHUNT_RESITANCE / CURRENT_GAIN / 512UL / ADC_SAMPLES;
-		current_uA = tmp;
-		tmp /= 10;
-		adcs = tmp;
-		reg_Ih.data = (adcs >> 8) & 0xFF;
-		reg_Il.data = adcs & 0xFF;
-		adcs = 0;
-		state.adc = ADC_STATE_U;
-		ADMUX  = BIT(MUX3) | BIT(MUX2);
-		ADCSRB = 0;
+		// Transmission gate prevents device from being charged/discharged
+		if(!DEVICE_ACTIVE) {
+			adc_shunt_cal = adcs;
+			// Short path. Target device is inactive, no need to perform further measurements
+			shutdown_adc();
+			state.adc = ADC_STATE_IDLE;
+			return 1;
+		} else {
+			tmp = adcs - adc_shunt_cal; // - adc_diff_cal;
+			tmp = tmp * REF_VOLTAGE * SHUNT_RESITANCE / CURRENT_GAIN / 512UL / ADC_SAMPLES;
+			current_uA = tmp;
+			tmp /= 10;
+			adcs = tmp;
+			reg_Ih.data = (adcs >> 8) & 0xFF;
+			reg_Il.data = adcs & 0xFF;
+			adcs = 0;
+			state.adc = ADC_STATE_U;
+			ADMUX  = BIT(MUX3) | BIT(MUX2);
+			ADCSRB = 0;
+		}
 	}
 	if(flags.adc_U) {
 		flags.adc_U = 0;
@@ -401,6 +428,7 @@ void adc_process() {
 		shutdown_adc();
 		state.adc = ADC_STATE_IDLE;
 	}
+	return 0;
 }
 
 #define TIMER1_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_TIMER1)
@@ -416,6 +444,7 @@ void adc_process() {
 int main(void)
 {
 	uint8_t i;
+	uint8_t calibrated = 0;
 	
 	struct timeval_t next_measure;
 	next_measure.nsecs = 0;
@@ -430,6 +459,8 @@ int main(void)
 	
 	state.timesource = CLOCK_NONE;
 	state.adc = ADC_STATE_IDLE;
+	state.output_on = 0;
+	state.charging = 0;
 	
 	timer1_cal.counter_ns = TIMER_COUNTER_NS;
 	timer1_cal.tick_ns = TIMER_TICK_NS;
@@ -443,7 +474,7 @@ int main(void)
 	DIDR0 = BIT(ADC2D) | BIT(ADC3D);
 	
 	// Enable power switch IO
-	output_on();
+	output_off();
 	DDRB |= BIT(PINB1);
 	
 	// Disable Timer 0 via PRR
@@ -452,21 +483,16 @@ int main(void)
 	// Initialize eeprom log writer
 	eeprom_init();
 	
+	// Read device description block
+	eeprom_read_device_block();
 	// Read last log block
 	if(eeprom_find_log_block()) {
-		state.output_on = log_block.data.flags.output_on;
-		if(state.output_on) {
-			output_on();
-			} else {
-			output_off();
-		}
-	} else {
 		// No valid log block found, write one
 		eeprom_write_log_block();
 	}
 	
 	// Load data from log block
-	uws_count = log_block.data.uWs;
+	uws_count = log_data.uWs;
 	
 	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
 		memset(regs[i], 0, sizeof(struct USI_I2C_Reg));		
@@ -474,6 +500,17 @@ int main(void)
 	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
 
 	sei();
+	
+	adc_start_measure();
+	while (!calibrated) {
+		set_sleep_mode(SLEEP_MODE_ADC);
+		sleep_enable();
+		sleep_cpu();
+		calibrated = adc_process();
+	}
+
+	set_output_state(log_data.flags.output_on);
+
 	while (1) {
 		uint8_t sleep_mode;
 		struct timeval_t time;
@@ -488,13 +525,13 @@ int main(void)
 		if(timecmp(&time, &next_measure) != LT && ADC_IDLE && OUTPUT_ON) {
 			adc_start_measure();
 			next_measure = time;
-			timeval_add_nsec(&next_measure, MEASURE_INTERVAL_NS);
+			timeval_add_nsec(&next_measure, DEVICE_ACTIVE ? MEASURE_INTERVAL_ACTIVE_NS : MEASURE_INTERVAL_PASSIVE_NS);
 		}
 
 		// Check if we should write a log entry
 		if(timecmp(&time, &next_log_write) != LT && !eeprom_busy()) {
-			log_block.data.flags.output_on = state.output_on;
-			log_block.data.uWs = uws_count;
+			log_data.flags.output_on = state.output_on;
+			log_data.uWs = uws_count;
 			eeprom_write_log_block();
 			next_log_write = time;
 			timeval_add_sec(&next_log_write, LOG_INTERVAL_SEC);
@@ -546,7 +583,9 @@ int main(void)
 		ATOMIC_END
 		
 		// Process power-up/power-down requests
-		
+		if(reg_output.data != state.output_on) {
+			set_output_state(reg_output.data);
+		}
 
 		// Data processing
 		adc_process();
