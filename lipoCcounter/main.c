@@ -102,7 +102,6 @@ extern struct eeprom_device_block dev_block;
 
 
 volatile struct {
-	uint8_t adc_cal:1;
 	uint8_t adc_I:1;
 	uint8_t adc_U:1;
 } flags;
@@ -189,7 +188,6 @@ enum {
 
 enum {
 	ADC_STATE_IDLE = 0,
-	ADC_STATE_CAL,
 	ADC_STATE_I,
 	ADC_STATE_U,
 };
@@ -372,9 +370,9 @@ void shutdown_adc() {
 
 void adc_start_measure() {
 	setup_adc();
-	state.adc = ADC_STATE_CAL;
-	// Setup ADC for differential offset measurement
-	ADMUX  = BIT(REFS1) | BIT(MUX2) | BIT(MUX0);
+	state.adc = ADC_STATE_I;
+	// Setup ADC for differential measurement
+	ADMUX = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
 	ADCSRA = BIT(ADEN) | BIT(ADIE) | BIT(ADPS0) | BIT(ADPS1) | BIT(ADPS2);
 	ADCSRB = BIT(BIN);
 }
@@ -383,26 +381,19 @@ void adc_start_measure() {
 
 uint8_t adc_process() {
 	int64_t tmp;
-	// TODO: We don't need this anymore. Use shunt calibration values directly.
-	if(flags.adc_cal) {
-		flags.adc_cal = 0;
-		adc_diff_cal = adcs;
-		reg_adc_calh.data = (adcs >> 8) & 0xFF;
-		reg_adc_call.data = adcs & 0xFF;
-		state.adc = ADC_STATE_I;
-		ADMUX = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
-	}
 	if(flags.adc_I) {
 		flags.adc_I = 0;
 		// Transmission gate prevents device from being charged/discharged
 		if(!DEVICE_ACTIVE) {
 			adc_shunt_cal = adcs;
 			// Short path. Target device is inactive, no need to perform further measurements
+			reg_adc_calh.data = (adcs >> 8) & 0xFF;
+			reg_adc_call.data = adcs & 0xFF;
 			shutdown_adc();
 			state.adc = ADC_STATE_IDLE;
 			return 1;
 		} else {
-			tmp = adcs - adc_shunt_cal; // - adc_diff_cal;
+			tmp = adcs - adc_shunt_cal;
 			tmp = tmp * REF_VOLTAGE * SHUNT_RESITANCE / CURRENT_GAIN / 512UL / ADC_SAMPLES;
 			current_uA = tmp;
 			tmp /= 10;
@@ -614,9 +605,6 @@ ISR(ADC_vect) {
 	if(adc_cnt >= ADC_SAMPLES) {
 		adc_cnt = 0;
 		switch(state.adc) {
-			case ADC_STATE_CAL:
-				flags.adc_cal = 1;
-				break;
 			case ADC_STATE_I:
 				flags.adc_I = 1;
 				break;
