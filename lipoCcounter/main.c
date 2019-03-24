@@ -10,7 +10,6 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/sleep.h>
-#include <util/delay.h>
 #include <string.h>
 #include <avr/eeprom.h>
 
@@ -105,6 +104,7 @@ extern struct eeprom_device_block dev_block;
 volatile struct {
 	uint8_t adc_I:1;
 	uint8_t adc_U:1;
+	uint8_t log_loaded:1;
 } flags;
 
 #define REG64(name) \
@@ -378,7 +378,7 @@ void adc_start_measure() {
 	ADCSRB = BIT(BIN);
 }
 
-#define DEVICE_ACTIVE (state.output_on || state.charging)
+#define DEVICE_ACTIVE (state.output_on)
 
 uint8_t adc_process() {
 	int64_t tmp;
@@ -390,6 +390,7 @@ uint8_t adc_process() {
 			// Short path. Target device is inactive, no need to perform further measurements
 			reg_adc_calh.data = (adcs >> 8) & 0xFF;
 			reg_adc_call.data = adcs & 0xFF;
+			adcs = 0;
 			shutdown_adc();
 			state.adc = ADC_STATE_IDLE;
 			return 1;
@@ -436,7 +437,6 @@ uint8_t adc_process() {
 int main(void)
 {
 	uint8_t i;
-	uint8_t calibrated = 0;
 	
 	struct timeval_t next_measure;
 	next_measure.nsecs = 0;
@@ -444,11 +444,15 @@ int main(void)
 
 	struct timeval_t next_log_write;
 	next_log_write.nsecs = 0;
-	next_log_write.secs = LOG_INTERVAL_SEC;
+	next_log_write.secs = 0;
 
 	past.nsecs = 0;
 	past.secs = 0;
 	
+	flags.adc_I = 0;
+	flags.adc_U = 0;
+	flags.log_loaded = 0;
+
 	state.timesource = CLOCK_NONE;
 	state.adc = ADC_STATE_IDLE;
 	state.output_on = 0;
@@ -466,7 +470,6 @@ int main(void)
 	DIDR0 = BIT(ADC2D) | BIT(ADC3D);
 	
 	// Enable power switch IO
-	output_off();
 	DDRB |= BIT(PINB1);
 	
 	// Disable Timer 0 via PRR
@@ -479,9 +482,9 @@ int main(void)
 	eeprom_read_device_block();
 	// Read last log block
 	if(eeprom_find_log_block()) {
-		// No valid log block found, write one
-		eeprom_write_log_block();
+		flags.log_loaded = 1;
 	}
+	set_output_state(log_data.flags.output_on);
 	
 	// Load data from log block
 	uws_count = log_data.uWs;
@@ -493,16 +496,22 @@ int main(void)
 
 	sei();
 	
-	set_time_source(CLOCK_WDT);
-	adc_start_measure();
-	while (!calibrated) {
-		set_sleep_mode(SLEEP_MODE_ADC);
-		sleep_enable();
-		sleep_cpu();
-		calibrated = adc_process();
+	// Run calibration if output is off
+	if(flags.log_loaded) {
+		adc_shunt_cal = log_data.adc_shunt_cal;
+	} else {
+		uint8_t calibrated = 0;
+		output_off();
+		set_time_source(CLOCK_WDT);
+		adc_start_measure();
+		while (!calibrated) {
+			set_sleep_mode(SLEEP_MODE_ADC);
+			sleep_enable();
+			sleep_cpu();
+			calibrated = adc_process();
+		}
+		set_output_state(log_data.flags.output_on);
 	}
-
-	set_output_state(log_data.flags.output_on);
 
 	while (1) {
 		uint8_t sleep_mode;
@@ -514,8 +523,8 @@ int main(void)
 		reg_uptimeh.data = (time.secs >> 8) & 0xFF;
 		reg_uptimel.data = time.secs & 0xFF;
 		
-		// Check if measurement is due, schedule only if output is on
-		if(timecmp(&time, &next_measure) != LT && ADC_IDLE && OUTPUT_ON) {
+		// Check if measurement is due
+		if(timecmp(&time, &next_measure) != LT && ADC_IDLE) {
 			adc_start_measure();
 			next_measure = time;
 			timeval_add_nsec(&next_measure, DEVICE_ACTIVE ? MEASURE_INTERVAL_ACTIVE_NS : MEASURE_INTERVAL_PASSIVE_NS);
@@ -525,6 +534,7 @@ int main(void)
 		if(timecmp(&time, &next_log_write) != LT && !eeprom_busy()) {
 			log_data.flags.output_on = state.output_on;
 			log_data.uWs = uws_count;
+			log_data.adc_shunt_cal = adc_shunt_cal;
 			eeprom_write_log_block();
 			next_log_write = time;
 			timeval_add_sec(&next_log_write, LOG_INTERVAL_SEC);
@@ -624,4 +634,10 @@ ISR(TIMER1_COMPA_vect) {
 
 ISR(WDT_vect) {
 	timeval_add_nsec(&past, wdt_cal.tick_ns);	
+}
+
+ISR(PCINT0_vect) {
+	if(!DEVICE_ACTIVE) {
+		// Do something with the value of SDA/SCL
+	}
 }
