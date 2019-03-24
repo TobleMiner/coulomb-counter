@@ -474,25 +474,25 @@ int main(void)
 	
 	// Disable Timer 0 via PRR
 	PRR = BIT(PRTIM0);
-	
+
+	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
+		memset(regs[i], 0, sizeof(struct USI_I2C_Reg));
+	}
+	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
+
 	// Initialize eeprom log writer
 	eeprom_init();
-	
+
 	// Read device description block
 	eeprom_read_device_block();
 	// Read last log block
 	if(eeprom_find_log_block()) {
 		flags.log_loaded = 1;
 	}
-	set_output_state(log_data.flags.output_on);
 	
 	// Load data from log block
+	set_output_state(log_data.flags.output_on);
 	uws_count = log_data.uWs;
-	
-	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
-		memset(regs[i], 0, sizeof(struct USI_I2C_Reg));		
-	}
-	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
 
 	sei();
 	
