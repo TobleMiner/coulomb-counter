@@ -5,7 +5,10 @@
  * Author : Tobias
  */ 
 
-#define F_CPU 8000000UL
+// This is an alibi value only
+// Dynamic reclocking makes it pretty much impossible to predict
+// this value accurately
+#define F_CPU 16000000UL
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
@@ -24,8 +27,10 @@
 #define CURRENT_GAIN 20ULL
 #define REF_VOLTAGE 1100ULL
 
-#define TIMER_TICK_NS 8000000UL 
-#define TIMER_COUNTER_NS 64000UL
+// Timer NS values are @16 MHz
+#define TIMER_TICK_NS 4000000UL 
+#define TIMER_COUNTER_NS 32000UL
+
 #define SEC_NSECS 1000000000UL
 #define SEC_USECS 1000000UL
 #define TIMER1_LIMIT 125
@@ -199,6 +204,14 @@ enum {
 	CLOCK_WDT,	
 };
 
+enum {
+	CPU_CLOCK_16MHZ = 0,
+	CPU_CLOCK_8MHZ,
+	CPU_CLOCK_4MHZ,
+	CPU_CLOCK_2MHZ,
+	CPU_CLOCK_1MHZ
+};
+
 #define ATOMIC_BEGIN do { cli();
 #define ATOMIC_END   sei(); } while(0);
 
@@ -206,8 +219,25 @@ struct {
 	uint8_t adc:2;
 	uint8_t timesource:2;
 	uint8_t output_on:1;
-	uint8_t charging:1;
+	uint8_t clocksource:3;
 } state;
+
+void set_clock_source(uint8_t source) {
+	ATOMIC_BEGIN
+	if(source != state.clocksource) {
+		// The worst: We need to transfer the current TCNT1 into past
+		// This might result in high (unpredictable?) latency
+		if(state.timesource == CLOCK_TIMER && TCNT1 > 0) {
+			now(&past);
+			TCNT1 = 0;
+			TIFR |= BIT(OCF1A);
+		}
+		CLKPR = BIT(CLKPCE);
+		CLKPR = source;
+		state.clocksource = source;
+	}
+	ATOMIC_END
+}
 
 //#define INVERT_OUTPUT
 
@@ -258,7 +288,7 @@ void now_fast(struct timeval_t* t) {
 void now(struct timeval_t* t) {
 	*t = past;
 	if(state.timesource == CLOCK_TIMER) {
-		timeval_add_nsec(t, timer1_cal.counter_ns * TCNT1);
+		timeval_add_nsec(t, (timer1_cal.counter_ns * TCNT1) << state.clocksource);
 	}
 }
 
@@ -456,7 +486,6 @@ int main(void)
 	state.timesource = CLOCK_NONE;
 	state.adc = ADC_STATE_IDLE;
 	state.output_on = 0;
-	state.charging = 0;
 	
 	timer1_cal.counter_ns = TIMER_COUNTER_NS;
 	timer1_cal.tick_ns = TIMER_TICK_NS;
@@ -475,6 +504,17 @@ int main(void)
 	// Disable Timer 0 via PRR
 	PRR = BIT(PRTIM0);
 	
+	PLLCSR = BIT(PLLE);
+	while(!(PLLCSR & BIT(PLOCK)));
+	
+	// Set clock to 8 MHz
+	set_clock_source(CPU_CLOCK_16MHZ);
+		
+	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
+		memset(regs[i], 0, sizeof(struct USI_I2C_Reg));		
+	}
+	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
+
 	// Initialize eeprom log writer
 	eeprom_init();
 	
@@ -484,15 +524,11 @@ int main(void)
 	if(eeprom_find_log_block()) {
 		flags.log_loaded = 1;
 	}
-	set_output_state(log_data.flags.output_on);
+	log_data.flags.output_on = 1;
 	
 	// Load data from log block
 	uws_count = log_data.uWs;
-	
-	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
-		memset(regs[i], 0, sizeof(struct USI_I2C_Reg));		
-	}
-	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
+	set_output_state(log_data.flags.output_on);
 
 	sei();
 	
@@ -552,10 +588,12 @@ int main(void)
 				sleep_mode = SLEEP_MODE_PWR_DOWN;
 			}
 		}
-		
+	
 		set_sleep_mode(sleep_mode);
 		sleep_enable();
 		sleep_cpu();
+
+		while(!(PLLCSR & BIT(PLOCK)));
 		
 		// Process calibration requests
 		ATOMIC_BEGIN
@@ -629,7 +667,7 @@ ISR(ADC_vect) {
 }
 
 ISR(TIMER1_COMPA_vect) {
-	timeval_add_nsec(&past, timer1_cal.tick_ns);
+	timeval_add_nsec(&past, timer1_cal.tick_ns << state.clocksource);
 }
 
 ISR(WDT_vect) {

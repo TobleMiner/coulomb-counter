@@ -26,7 +26,12 @@ char usi_i2c_slave_internal_address;
 char usi_i2c_slave_address;
 char usi_i2c_mode;
 
-#define USI_I2C_TIMEOUT_NS 10000000;
+#define USI_I2C_TIMEOUT_NS 10000000UL;
+
+#define DEBUG_LO (PORTB &= ~BIT(PB1))
+#define DEBUG_HI (PORTB |= BIT(PB1))
+#define DEBUG_BLIP do { DEBUG_LO; asm("nop\n"); DEBUG_HI; } while(0)
+
 
 struct timeval_t usi_i2c_timeout;
 struct timeval_t usi_i2c_last_xfer;
@@ -141,6 +146,7 @@ uint8_t USI_I2C_Busy() {
 /////////////////////////////////////////////////////////////////////////////////
 
 ISR(USI_START_vect) {
+	DEBUG_BLIP;
 	USI_I2C_Slave_State = USI_SLAVE_CHECK_ADDRESS;
 
 	USI_SET_SDA_INPUT();
