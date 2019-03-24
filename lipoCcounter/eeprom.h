@@ -4,11 +4,12 @@
 #include <stdint.h>
 
 struct eeprom_log_data {
-	int32_t uWs;
-	uint32_t last_capacity_uWs;
+	int32_t mAs;
+	uint32_t last_capacity_mAs;
 	// Shunt can't be calibrated while output is on,
 	// thus we need to save the last calibration value
 	int16_t adc_shunt_cal;
+	uint16_t cycle_count;
 	struct {
 		uint8_t output_on:1;
 		uint8_t power_down_low_voltage:1;
@@ -28,7 +29,7 @@ struct eeprom_log_block {
 };
 
 struct eeprom_device_block  {
-	uint16_t design_capacity_mWh;
+	uint16_t design_capacity_mAh;
 	uint16_t design_voltage_mV;
 	uint16_t min_voltage_mV;  // Lower shutdown threshold
 	uint16_t max_voltage_mV;  // Upper shutdown threshold
