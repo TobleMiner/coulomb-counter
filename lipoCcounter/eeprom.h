@@ -4,7 +4,6 @@
 #include <stdint.h>
 
 struct eeprom_log_data {
-	uint8_t  serial;
 	int32_t uWs;
 	uint32_t last_capacity_uWs;
 	// Shunt can't be calibrated while output is on,
@@ -16,8 +15,13 @@ struct eeprom_log_data {
 	} flags;
 };
 
-struct eeprom_log_block {
+struct eeprom_log_data_priv {
+	uint8_t serial;
 	struct eeprom_log_data data;
+};
+
+struct eeprom_log_block {
+	struct eeprom_log_data_priv data;
 	// Writing the data block can not be an atomic
 	// operation, crc ensures integrity
 	uint16_t crc;
