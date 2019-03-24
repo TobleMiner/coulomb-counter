@@ -19,6 +19,7 @@
 #include "usi_i2c_slave.h"
 #include "eeprom.h"
 
+#define ADC_SKIP_SAMPLES 2
 #define ADC_SAMPLES 32UL
 #define SHUNT_RESITANCE 950UL
 #define CURRENT_GAIN 20UL
@@ -492,6 +493,7 @@ int main(void)
 
 	sei();
 	
+	set_time_source(CLOCK_WDT);
 	adc_start_measure();
 	while (!calibrated) {
 		set_sleep_mode(SLEEP_MODE_ADC);
@@ -596,13 +598,15 @@ uint16_t adc_val() {
 }
 
 ISR(ADC_vect) {
-	if(ADC_CONVERSION_IS_BIPOLAR) {
-		adcs += adc_val_bipo();
-	} else {
-		adc += adc_val();
+	if(adc_cnt >= ADC_SKIP_SAMPLES) {
+		if(ADC_CONVERSION_IS_BIPOLAR) {
+			adcs += adc_val_bipo();
+		} else {
+			adc += adc_val();
+		}
 	}
 	adc_cnt++;
-	if(adc_cnt >= ADC_SAMPLES) {
+	if(adc_cnt >= ADC_SKIP_SAMPLES + ADC_SAMPLES) {
 		adc_cnt = 0;
 		switch(state.adc) {
 			case ADC_STATE_I:
