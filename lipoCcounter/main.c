@@ -35,7 +35,12 @@
 #define MEASURE_INTERVAL_PASSIVE_NS 5000000000UL // Each 5000 ms
 #define LOG_INTERVAL_SEC 60UL
 #define EPSILON_CHARGE_UA 1000UL
-#define EPSILON_CHARGE (EPSILON_CHARGE_UA * CURRENT_GAIN * 512UL * ADC_SAMPLES / (REF_VOLTAGE * SHUNT_RESITANCE))
+#define CHARGE_HYSTERESIS_UA 300UL
+#define EPSILON_CHARGE_LOWER (((EPSILON_CHARGE_UA - CHARGE_HYSTERESIS_UA) * SHUNT_RESISTANCE * ADC_SAMPLES * 512LL * CURRENT_GAIN) / 1000000LL / SHUNT_RESISTANCE)
+#define EPSILON_CHARGE_UPPER ((EPSILON_CHARGE_UA * SHUNT_RESISTANCE * ADC_SAMPLES * 512LL * CURRENT_GAIN) / 1000000LL / SHUNT_RESISTANCE)
+
+const int64_t current_div = (int64_t)CURRENT_GAIN * 512LL * (int64_t)ADC_SAMPLES * (int64_t)SHUNT_RESISTANCE;
+const int64_t sec_psecs = 1000LL * (int64_t)SEC_USECS;
 
 struct {
 	uint64_t tick_ns;
@@ -83,6 +88,12 @@ struct {
 	(reg##_48)->data = (val >> 48) & 0xFF;\
 	(reg##_56)->data = (val >> 56) & 0xFF; } while(0)
 
+#define REG32_WRITE(reg, val) do {\
+	(reg##_0)->data = val & 0xFF;\
+	(reg##_8)->data = (val >> 8) & 0xFF;\
+	(reg##_16)->data = (val >> 16) & 0xFF;\
+	(reg##_24)->data = (val >> 24) & 0xFF; } while(0)
+
 volatile uint16_t adc_cnt;
 volatile uint16_t adc;
 volatile int16_t adcs;
@@ -90,12 +101,13 @@ volatile int16_t adc_diff_cal;
 volatile int16_t adc_shunt_cal;
 
 int64_t current_uA;
+int64_t current_uA_avg;
 int16_t voltage_mV;
+
+int32_t mAs_count;
 
 struct timeval_t past;
 struct timeval_t last_measure;
-
-int32_t uws_count;
 
 extern struct eeprom_log_data log_data;
 extern struct eeprom_device_block dev_block;
@@ -117,19 +129,19 @@ volatile struct {
 	struct USI_I2C_Reg name##_8;\
 	struct USI_I2C_Reg name##_0;
 
+#define REG32(name) \
+	struct USI_I2C_Reg name##_24;\
+	struct USI_I2C_Reg name##_16;\
+	struct USI_I2C_Reg name##_8;\
+	struct USI_I2C_Reg name##_0;
+
 struct USI_I2C_Reg reg_Ih;
 struct USI_I2C_Reg reg_Il;
 
 struct USI_I2C_Reg reg_Uh;
 struct USI_I2C_Reg reg_Ul;
 
-struct USI_I2C_Reg reg_uWsh;
-struct USI_I2C_Reg reg_uWsmh;
-struct USI_I2C_Reg reg_uWsml;
-struct USI_I2C_Reg reg_uWsl;
-
-struct USI_I2C_Reg reg_mWh; 
-struct USI_I2C_Reg reg_mWl;
+REG32(reg_mAs);
 
 struct USI_I2C_Reg reg_uptimeh;
 struct USI_I2C_Reg reg_uptimel;
@@ -154,31 +166,52 @@ REG64(reg_cal);
 
 struct USI_I2C_Reg reg_output;
 
+struct USI_I2C_Reg reg_I_avgh;
+struct USI_I2C_Reg reg_I_avgl;
+
+REG32(reg_time_left);
+
+REG32(reg_design_capacity_mAs);
+
+REG32(reg_current_capacity_mAs);
+
 struct USI_I2C_Reg* regs[] = {
 	&reg_Ih,
 	&reg_Il,
 	&reg_Uh,
 	&reg_Ul,
-	&reg_uWsh,
-	&reg_uWsmh,
-	&reg_uWsml,
-	&reg_uWsl,
-	&reg_mWh,
-	&reg_mWl,
+	&reg_mAs_24,
+	&reg_mAs_16,
+	&reg_mAs_8,
+	&reg_mAs_0,
 	&reg_uptimeh,
 	&reg_uptimel,
 	&reg_adc_calh,
 	&reg_adc_call,
-	&reg_cal_flags, // 14
-	&reg_cal_56,    // 15
-	&reg_cal_48,    // 16
-	&reg_cal_40,    // 17
-	&reg_cal_32,    // 18
-	&reg_cal_24,    // 19
-	&reg_cal_16,    // 20
-	&reg_cal_8,     // 21
-	&reg_cal_0,     // 22
-	&reg_output,    // 23
+	&reg_cal_flags, // 12
+	&reg_cal_56,    // 13
+	&reg_cal_48,    // 14
+	&reg_cal_40,    // 15
+	&reg_cal_32,    // 16
+	&reg_cal_24,    // 17
+	&reg_cal_16,    // 18
+	&reg_cal_8,     // 19
+	&reg_cal_0,     // 20
+	&reg_output,    // 21
+	&reg_I_avgh,
+	&reg_I_avgl,
+	&reg_time_left_24,
+	&reg_time_left_16,
+	&reg_time_left_8,
+	&reg_time_left_0,
+	&reg_design_capacity_mAs_24,
+	&reg_design_capacity_mAs_16,
+	&reg_design_capacity_mAs_8,
+	&reg_design_capacity_mAs_0,
+	&reg_current_capacity_mAs_24,
+	&reg_current_capacity_mAs_16,
+	&reg_current_capacity_mAs_8,
+	&reg_current_capacity_mAs_0,
 };
 
 enum {
@@ -294,24 +327,15 @@ uint64_t timedelta_ns(struct timeval_t* pre, struct timeval_t* post) {
 	return SEC_NSECS * delta.secs + delta.nsecs;
 }
 
-void update_uwh_count() {
-	int32_t power_uW;
-	int32_t power_mW;
+void update_mAs_count() {
 	struct timeval_t current;
 	struct timeval_t delta;
 	now(&current);
 	timedelta(&last_measure, &current, &delta);
-	power_uW = voltage_mV * current_uA / 1000L;
-	power_mW = power_uW / (int32_t)1000L;
-	reg_mWh.data = (power_mW >> 8) & 0xFF;
-	reg_mWl.data = power_mW & 0xFF;
 
-	uws_count += ((int64_t)delta.secs) * power_uW;
-	uws_count += ((int64_t)delta.nsecs) * power_mW / ((int64_t)SEC_USECS);
-	reg_uWsh.data = (uws_count >> 24) & 0xFF;
-	reg_uWsmh.data = (uws_count >> 16) & 0xFF;
-	reg_uWsml.data = (uws_count >> 8) & 0xFF;
-	reg_uWsl.data = (uws_count >> 0) & 0xFF;
+	mAs_count += ((int64_t)delta.secs) * current_uA / 1000L;
+	mAs_count += ((int64_t)delta.nsecs) * current_uA / sec_psecs;
+	REG32_WRITE(&reg_mAs, mAs_count);
 	last_measure = current;
 }
 
@@ -396,12 +420,25 @@ uint8_t adc_process() {
 			return 1;
 		} else {
 			tmp = adcs - adc_shunt_cal;
-			tmp = (tmp * (int64_t)REF_VOLTAGE * 1000000LL) / (int64_t)CURRENT_GAIN / (int64_t)512LL / (int64_t)ADC_SAMPLES / (int64_t)SHUNT_RESISTANCE;
+			if(tmp >= EPSILON_CHARGE_UPPER) {
+				state.charging = 1;
+			}
+			else if(tmp < EPSILON_CHARGE_LOWER) {
+				state.charging = 0;
+			}
+			tmp = (tmp * (int64_t)REF_VOLTAGE * 1000000LL) / current_div;
 			current_uA = tmp;
-			tmp /= 10;
-			adcs = tmp;
+			adcs = tmp / 10LL;
 			reg_Ih.data = (adcs >> 8) & 0xFF;
 			reg_Il.data = adcs & 0xFF;
+			current_uA_avg = ((current_uA_avg * 900LL) + (current_uA * 100LL)) / 1000LL;
+			adcs = current_uA_avg / 10LL;
+			reg_I_avgh.data = (adcs >> 8) & 0xFF;
+			reg_I_avgl.data = adcs & 0xFF;
+			// Calculate time left
+//			tmp = dev_block.design_capacity_mAh * 3600LL * 1000LL / current_uA_avg;
+//			REG32_WRITE(&reg_time_left, tmp);
+			
 			adcs = 0;
 			state.adc = ADC_STATE_U;
 			ADMUX  = BIT(MUX3) | BIT(MUX2);
@@ -417,7 +454,7 @@ uint8_t adc_process() {
 		reg_Uh.data = (adc >> 8) & 0xFF;
 		reg_Ul.data = adc & 0xFF;
 		adc = 0;
-		update_uwh_count();
+		update_mAs_count();
 		shutdown_adc();
 		state.adc = ADC_STATE_IDLE;
 	}
@@ -488,15 +525,21 @@ int main(void)
 	// Read last log block
 	if(eeprom_find_log_block()) {
 		flags.log_loaded = 1;
+	} else {
+		log_data.last_capacity_mAs = dev_block.design_capacity_mAh * 3600UL;
 	}
+	
+	// Load data from device block
+	REG32_WRITE(&reg_design_capacity_mAs, dev_block.design_capacity_mAh * 3600UL);
 	
 	// Load data from log block
 	set_output_state(log_data.flags.output_on);
-	uws_count = log_data.uWs;
+	mAs_count = log_data.mAs;
+	REG32_WRITE(&reg_current_capacity_mAs, log_data.last_capacity_mAs);
 
 	sei();
 	
-	// Run calibration if output is off
+	// Run calibration if there is no calibration data
 	if(flags.log_loaded) {
 		adc_shunt_cal = log_data.adc_shunt_cal;
 	} else {
@@ -533,7 +576,7 @@ int main(void)
 		// Check if we should write a log entry
 		if(timecmp(&time, &next_log_write) != LT && !eeprom_busy()) {
 			log_data.flags.output_on = state.output_on;
-			log_data.uWs = uws_count;
+			log_data.mAs = mAs_count;
 			log_data.adc_shunt_cal = adc_shunt_cal;
 			eeprom_write_log_block();
 			next_log_write = time;
@@ -591,7 +634,9 @@ int main(void)
 		}
 
 		// Data processing
+		//DEBUG_LO;
 		adc_process();
+		//DEBUG_HI;
 	}
 }
 
