@@ -28,19 +28,28 @@ int validate_block(struct eeprom_log_block* block) {
 }
 
 void parse_blocks(unsigned char* eeprom) {
-  struct eeprom_log_block* blocks[NUM_BLOCKS];
-  int i, valid = 0, invalid = 0;
+  struct eeprom_log_block* blocks[NUM_BLOCKS], *newest_block = NULL;
+  int i, valid = 0, invalid = 0, newest_block_index, latest_revision = 0;
   for(i = 0; i < NUM_BLOCKS; i++) {
     struct eeprom_log_block* block = (struct eeprom_log_block*)(eeprom + LOG_OFFSET + LOG_ENTRY_SIZE * i);
     hexdump(block, sizeof(*block));
     blocks[i] = block;
     if(validate_block(block)) {
       valid++;
+      if(block->data.serial >= latest_revision) {
+        latest_revision = block->data.serial;
+        newest_block_index = i;
+        newest_block = block;
+      }
     } else {
       invalid++;
     }
   }
   printf("Got %ld blocks (size=%zu), %d are valid\n", NUM_BLOCKS, LOG_ENTRY_SIZE, valid);
+  if(newest_block) {
+    printf("Most recent valid block is at index %d:\n", newest_block_index);
+    hexdump(newest_block, sizeof(*newest_block));
+  }
 }
 
 int main(int argc, char** argv) {
