@@ -3,3 +3,4 @@ lipoCcounter/Debug/*
 eeprom/
 eetool/eetool
 eetool/.gdb_history
+*.o
