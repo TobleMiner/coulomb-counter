@@ -20,10 +20,10 @@
 #include "eeprom.h"
 
 #define ADC_SKIP_SAMPLES 2
-#define ADC_SAMPLES 32UL
-#define SHUNT_RESITANCE 950UL
-#define CURRENT_GAIN 20UL
-#define REF_VOLTAGE 1100UL
+#define ADC_SAMPLES 32ULL
+#define SHUNT_RESISTANCE 1200ULL
+#define CURRENT_GAIN 20ULL
+#define REF_VOLTAGE 1100ULL
 
 #define TIMER_TICK_NS 8000000UL 
 #define TIMER_COUNTER_NS 64000UL
@@ -395,7 +395,7 @@ uint8_t adc_process() {
 			return 1;
 		} else {
 			tmp = adcs - adc_shunt_cal;
-			tmp = tmp * REF_VOLTAGE * SHUNT_RESITANCE / CURRENT_GAIN / 512UL / ADC_SAMPLES;
+			tmp = (tmp * (int64_t)REF_VOLTAGE * 1000000LL) / (int64_t)CURRENT_GAIN / (int64_t)512LL / (int64_t)ADC_SAMPLES / (int64_t)SHUNT_RESISTANCE;
 			current_uA = tmp;
 			tmp /= 10;
 			adcs = tmp;
