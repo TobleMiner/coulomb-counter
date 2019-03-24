@@ -1,9 +1,9 @@
 CC ?= gcc
 RM = rm -f
 
-CCFLAGS = -Wall
+CCFLAGS = -Wall -fpack-struct
 
-OBJS = eetool.c ../lipoCcounter/crc.c
+OBJS = eetool.o ../lipoCcounter/crc.o
 
 all: eetool
 
