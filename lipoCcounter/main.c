@@ -15,13 +15,13 @@
 
 #include "time.h"
 #include "util.h"
-#include "usi_i2c_slave.h"
+#include "twi_i2c_slave.h"
 #include "eeprom.h"
 
 #define ADC_SKIP_SAMPLES 2
 #define ADC_SAMPLES 32ULL
 #define SHUNT_RESISTANCE 1200ULL
-#define CURRENT_GAIN 20ULL
+#define CURRENT_GAIN 10ULL
 #define REF_VOLTAGE 1100ULL
 
 #define TIMER_TICK_NS 8000000UL 
@@ -42,6 +42,20 @@
 const int64_t current_div = (int64_t)CURRENT_GAIN * 512LL * (int64_t)ADC_SAMPLES * (int64_t)SHUNT_RESISTANCE;
 const int64_t sec_psecs = 1000LL * (int64_t)SEC_USECS;
 
+#define DEBUG_DDR  DDRD
+#define DEBUG_PORT PORTD
+#define DEBUG_INIT(x) (DEBUG_DDR |= BIT((x)))
+#define DEBUG_LO(x)   (DEBUG_PORT &= ~BIT((x)))
+#define DEBUG_HI(x)   (DEBUG_PORT |= BIT((x)))
+#define DEBUG_BLIP(x) do { DEBUG_HI((x)); asm("nop\n"); DEBUG_LO((x)); } while(0)
+
+#define OUTPUT_DDR  DDRB
+#define OUTPUT_PORT PORTB
+#define OUTPUT_PIN  PINB0
+
+//#define INVERT_OUTPUT
+
+
 struct {
 	uint64_t tick_ns;
 	uint64_t counter_ns;
@@ -50,13 +64,6 @@ struct {
 struct {
 	uint64_t tick_ns;
 } wdt_cal;
-
-#define ADC_CONVERSION_IN_PROGRESS (ADCSRA & BIT(ADSC))
-#define ADC_CONVERSION_IS_BIPOLAR (ADCSRB & BIT(BIN))
-
-#define DEBUG_LO (PORTB &= ~BIT(PB1))
-#define DEBUG_HI (PORTB |= BIT(PB1))
-#define DEBUG_BLIP do { DEBUG_HI; asm("nop\n"); DEBUG_LO; } while(0)
 
 #define REG64_CHANGED(reg) (\
 	(reg##_56)->attr.changed &&\
@@ -120,34 +127,34 @@ volatile struct {
 } flags;
 
 #define REG64(name) \
-	struct USI_I2C_Reg name##_56;\
-	struct USI_I2C_Reg name##_48;\
-	struct USI_I2C_Reg name##_40;\
-	struct USI_I2C_Reg name##_32;\
-	struct USI_I2C_Reg name##_24;\
-	struct USI_I2C_Reg name##_16;\
-	struct USI_I2C_Reg name##_8;\
-	struct USI_I2C_Reg name##_0;
+	struct TWI_I2C_Reg name##_56;\
+	struct TWI_I2C_Reg name##_48;\
+	struct TWI_I2C_Reg name##_40;\
+	struct TWI_I2C_Reg name##_32;\
+	struct TWI_I2C_Reg name##_24;\
+	struct TWI_I2C_Reg name##_16;\
+	struct TWI_I2C_Reg name##_8;\
+	struct TWI_I2C_Reg name##_0;
 
 #define REG32(name) \
-	struct USI_I2C_Reg name##_24;\
-	struct USI_I2C_Reg name##_16;\
-	struct USI_I2C_Reg name##_8;\
-	struct USI_I2C_Reg name##_0;
+	struct TWI_I2C_Reg name##_24;\
+	struct TWI_I2C_Reg name##_16;\
+	struct TWI_I2C_Reg name##_8;\
+	struct TWI_I2C_Reg name##_0;
 
-struct USI_I2C_Reg reg_Ih;
-struct USI_I2C_Reg reg_Il;
+struct TWI_I2C_Reg reg_Ih;
+struct TWI_I2C_Reg reg_Il;
 
-struct USI_I2C_Reg reg_Uh;
-struct USI_I2C_Reg reg_Ul;
+struct TWI_I2C_Reg reg_Uh;
+struct TWI_I2C_Reg reg_Ul;
 
 REG32(reg_mAs);
 
-struct USI_I2C_Reg reg_uptimeh;
-struct USI_I2C_Reg reg_uptimel;
+struct TWI_I2C_Reg reg_uptimeh;
+struct TWI_I2C_Reg reg_uptimel;
 
-struct USI_I2C_Reg reg_adc_calh;
-struct USI_I2C_Reg reg_adc_call;
+struct TWI_I2C_Reg reg_adc_calh;
+struct TWI_I2C_Reg reg_adc_call;
 
 enum {
 	CALIBRATE_NONE = 0,
@@ -160,14 +167,14 @@ enum {
 	CALIBRATE_WDT
 };
 
-struct USI_I2C_Reg reg_cal_flags;
+struct TWI_I2C_Reg reg_cal_flags;
 
 REG64(reg_cal);
 
-struct USI_I2C_Reg reg_output;
+struct TWI_I2C_Reg reg_output;
 
-struct USI_I2C_Reg reg_I_avgh;
-struct USI_I2C_Reg reg_I_avgl;
+struct TWI_I2C_Reg reg_I_avgh;
+struct TWI_I2C_Reg reg_I_avgl;
 
 REG32(reg_time_left);
 
@@ -175,7 +182,7 @@ REG32(reg_design_capacity_mAs);
 
 REG32(reg_current_capacity_mAs);
 
-struct USI_I2C_Reg* regs[] = {
+struct TWI_I2C_Reg* regs[] = {
 	&reg_Ih,
 	&reg_Il,
 	&reg_Uh,
@@ -232,9 +239,6 @@ enum {
 	CLOCK_WDT,	
 };
 
-#define ATOMIC_BEGIN do { cli();
-#define ATOMIC_END   sei(); } while(0);
-
 struct {
 	uint8_t adc:2;
 	uint8_t timesource:2;
@@ -242,23 +246,24 @@ struct {
 	uint8_t charging:1;
 } state;
 
-//#define INVERT_OUTPUT
+#define ADC_CONVERSION_IN_PROGRESS (ADCSRA & BIT(ADSC))
+#define ADC_CONVERSION_IS_BIPOLAR (state.adc == ADC_STATE_I)
 
 void output_on() {
 	state.output_on = 1;
 #ifndef INVERT_OUTPUT
-	PORTB |= BIT(PINB1);
+	OUTPUT_PORT |= BIT(OUTPUT_PIN);
 #else
-	PORTB &= ~BIT(PINB1);
+	OUTPUT_PORT &= ~BIT(OUTPUT_PIN);
 #endif
 }
 
 void output_off() {
 	state.output_on = 0;
 #ifndef INVERT_OUTPUT
-	PORTB &= ~BIT(PINB1);
+	OUTPUT_PORT &= ~BIT(OUTPUT_PIN);
 #else
-	PORTB |= BIT(PINB1);
+	OUTPUT_PORT |= BIT(OUTPUT_PIN);
 #endif
 }
 
@@ -291,7 +296,7 @@ void now_fast(struct timeval_t* t) {
 void now(struct timeval_t* t) {
 	*t = past;
 	if(state.timesource == CLOCK_TIMER) {
-		timeval_add_nsec(t, timer1_cal.counter_ns * TCNT1);
+		timeval_add_nsec(t, timer1_cal.counter_ns * TCNT1L);
 	}
 }
 
@@ -340,27 +345,28 @@ void update_mAs_count() {
 }
 
 void setup_timer1()  {
-	PRR &= ~BIT(PRTIM1);
+	PRR0 &= ~BIT(PRTIM1);
 	// Set up timer (CLKDIV /512, compare match)
-	TIMSK = BIT(OCIE1A);
+	TIMSK1 = BIT(OCIE1A);
 	// One compare match interrupt each 8 ms
-	OCR1A = TIMER1_LIMIT;
-	TCNT1 = 0;
-	TCCR1 = BIT(CTC1) | BIT(CS10) | BIT(CS13);
+	OCR1AL = TIMER1_LIMIT;
+	OCR1AH = 0;
+	TCNT1L = 0;
+	TCCR1B = BIT(WGM12) | BIT(CS12);
 }
 
 void shutdown_timer1() {
-	TCCR1 = 0;
-	PRR |= BIT(PRTIM1);
+	TCCR1B = 0;
+	PRR0 |= BIT(PRTIM1);
 }
 
 void setup_wdt() {
 	// Set up watchdog timer, ~8 interrupts per second
-	WDTCR = BIT(WDIE) | BIT(WDCE) | BIT(WDP1) | BIT(WDP0);	
+	WDTCSR = BIT(WDIE) | BIT(WDCE) | BIT(WDP1) | BIT(WDP0);	
 }
 
 void shutdown_wdt() {
-	WDTCR = BIT(WDCE);
+	WDTCSR = BIT(WDCE);
 }
 
 void set_time_source(uint8_t source) {
@@ -384,22 +390,21 @@ void set_time_source(uint8_t source) {
 }
 
 void setup_adc() {
-	PRR &= ~BIT(PRADC);
+	PRR0 &= ~BIT(PRADC);
 	ADCSRA |= BIT(ADEN);
 }
 
 void shutdown_adc() {
 	ADCSRA &= ~BIT(ADEN);
-	PRR |= BIT(PRADC);	
+	PRR0 |= BIT(PRADC);	
 }
 
 void adc_start_measure() {
 	setup_adc();
 	state.adc = ADC_STATE_I;
 	// Setup ADC for differential measurement
-	ADMUX = BIT(REFS1) | BIT(MUX2) | BIT(MUX1) | BIT(MUX0);
+	ADMUX = BIT(REFS1) | BIT(MUX3) | BIT(MUX0);
 	ADCSRA = BIT(ADEN) | BIT(ADIE) | BIT(ADPS0) | BIT(ADPS1) | BIT(ADPS2);
-	ADCSRB = BIT(BIN);
 }
 
 #define DEVICE_ACTIVE (state.output_on)
@@ -441,7 +446,7 @@ uint8_t adc_process() {
 			
 			adcs = 0;
 			state.adc = ADC_STATE_U;
-			ADMUX  = BIT(MUX3) | BIT(MUX2);
+			ADMUX  = BIT(REFS0) | BIT(MUX4) | BIT(MUX3) | BIT(MUX2) | BIT(MUX1);
 			ADCSRB = 0;
 		}
 	}
@@ -504,18 +509,19 @@ int main(void)
 	uint8_t last_cal = CALIBRATE_NONE;
 
 	// Disable input buffer on ADC pins
-	DIDR0 = BIT(ADC2D) | BIT(ADC3D);
+	DIDR0 = BIT(ADC0D) | BIT(ADC1D);
 	
 	// Enable power switch IO
-	DDRB |= BIT(PINB1);
+	OUTPUT_DDR |= BIT(OUTPUT_PIN);
 	
 	// Disable Timer 0 via PRR
-	PRR = BIT(PRTIM0);
+	PRR0 = BIT(PRTIM0) | BIT(PRTIM2) | BIT(PRUSART1) | BIT(PRSPI) | BIT(PRUSART0);
+	PRR1 = BIT(PRTIM3);
 
 	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
-		memset(regs[i], 0, sizeof(struct USI_I2C_Reg));
+		memset(regs[i], 0, sizeof(struct TWI_I2C_Reg));
 	}
-	USI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
+	TWI_I2C_Init(0x42, regs, sizeof(regs) / sizeof(*regs));
 
 	// Initialize eeprom log writer
 	eeprom_init();
@@ -585,7 +591,7 @@ int main(void)
 		
 		// Sleep
 		// USI counter overflows wake the controller up from IDLE only
-		if(USI_I2C_Busy() || TIMER1_CAL_IN_PROGRESS) {
+		if(TWI_I2C_Busy() || TIMER1_CAL_IN_PROGRESS) {
 			set_time_source(CLOCK_TIMER);
 			sleep_mode = SLEEP_MODE_IDLE;
 		} else {

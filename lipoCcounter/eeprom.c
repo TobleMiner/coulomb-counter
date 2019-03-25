@@ -16,7 +16,9 @@ uint16_t write_addr;
 
 #define LOG_ENTRIES ((EEPROM_SIZE - sizeof(struct eeprom_device_block)) / LOG_ENTRY_LEN)
 
-EEMEM struct eeprom_device_block devicedata;
+EEMEM struct eeprom_device_block devicedata = {
+	.design_capacity_mAh = 2500
+};
 EEMEM struct eeprom_log_block logdata[LOG_ENTRIES];
 
 
@@ -94,7 +96,7 @@ void eeprom_write_log_block() {
 	eeprom_write_next_byte();
 }
 
-ISR(EE_RDY_vect) {
+ISR(EE_READY_vect) {
 	write_addr++;
 	write_data++;
 	write_len--;

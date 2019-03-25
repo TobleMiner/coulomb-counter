@@ -60,8 +60,6 @@
     #define PIN_USI_SCL         PINB7
 #endif
 
-struct USI_I2C_Reg;
-
 struct USI_I2C_Reg {
 	struct {
 		uint8_t changed:1;

@@ -38,7 +38,7 @@ struct eeprom_device_block  {
 	} flags;
 };
 
-#define EEPROM_SIZE       512
+#define EEPROM_SIZE 4096
 
 void eeprom_init();
 void eeprom_read_device_block();
