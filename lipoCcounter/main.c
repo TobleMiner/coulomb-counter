@@ -364,7 +364,9 @@ void setup_wdt() {
 }
 
 void shutdown_wdt() {
-	WDTCSR = BIT(WDCE);
+	MCUSR &= ~BIT(WDRF);
+	WDTCSR = BIT(WDCE) | BIT(WDE);
+	WDTCSR = 0;
 }
 
 void set_time_source(uint8_t source) {
@@ -589,7 +591,7 @@ int main(void)
 		
 		// Sleep
 		// USI counter overflows wake the controller up from IDLE only
-		if(TWI_I2C_Busy() || TIMER1_CAL_IN_PROGRESS || 1) {
+		if(TWI_I2C_Busy() || TIMER1_CAL_IN_PROGRESS) {
 			set_time_source(CLOCK_TIMER);
 			sleep_mode = SLEEP_MODE_IDLE;
 		} else {
