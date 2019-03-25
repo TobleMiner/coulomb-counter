@@ -17,6 +17,8 @@
 #include "util.h"
 #include "twi_i2c_slave.h"
 #include "eeprom.h"
+#include "debug.h"
+
 
 #define ADC_SKIP_SAMPLES 2
 #define ADC_SAMPLES 32ULL
@@ -41,13 +43,6 @@
 
 const int64_t current_div = (int64_t)CURRENT_GAIN * 512LL * (int64_t)ADC_SAMPLES * (int64_t)SHUNT_RESISTANCE;
 const int64_t sec_psecs = 1000LL * (int64_t)SEC_USECS;
-
-#define DEBUG_DDR  DDRD
-#define DEBUG_PORT PORTD
-#define DEBUG_INIT(x) (DEBUG_DDR |= BIT((x)))
-#define DEBUG_LO(x)   (DEBUG_PORT &= ~BIT((x)))
-#define DEBUG_HI(x)   (DEBUG_PORT |= BIT((x)))
-#define DEBUG_BLIP(x) do { DEBUG_HI((x)); asm("nop\n"); DEBUG_LO((x)); } while(0)
 
 #define OUTPUT_DDR  DDRB
 #define OUTPUT_PORT PORTB
