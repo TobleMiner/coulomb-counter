@@ -14,7 +14,7 @@
 #define LOG_OFFSET 0 //(sizeof(struct eeprom_device_block))
 #define LOG_ENTRY_SIZE (sizeof(struct eeprom_log_block))
 #define LOG_DATA_SIZE (sizeof(struct eeprom_log_data_priv))
-#define NUM_BLOCKS ((EEPROM_SIZE - LOG_OFFSET) / LOG_ENTRY_SIZE)
+#define NUM_BLOCKS (CLAMPH((EEPROM_SIZE - LOG_OFFSET) / LOG_ENTRY_SIZE, 255))
 
 void hexdump(void* ptr, size_t len) {
   while(len--) {
