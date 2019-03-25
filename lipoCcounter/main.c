@@ -12,6 +12,7 @@
 #include <avr/sleep.h>
 #include <string.h>
 #include <avr/eeprom.h>
+#include <avr/wdt.h>
 
 #include "time.h"
 #include "util.h"
@@ -27,10 +28,10 @@
 #define REF_VOLTAGE 1100ULL
 
 #define TIMER_TICK_NS 8000000UL 
-#define TIMER_COUNTER_NS 64000UL
+#define TIMER_COUNTER_NS 32000UL
 #define SEC_NSECS 1000000000UL
 #define SEC_USECS 1000000UL
-#define TIMER1_LIMIT 125
+#define TIMER1_LIMIT 250
 #define WDT_TICK_NS 125000000UL
 #define MEASURE_INTERVAL_ACTIVE_NS  100000000UL // Each 100 ms
 // Occasional wakeup is also important while passive since attaching of a charger must be detected
@@ -357,7 +358,9 @@ void shutdown_timer1() {
 
 void setup_wdt() {
 	// Set up watchdog timer, ~8 interrupts per second
-	WDTCSR = BIT(WDIE) | BIT(WDCE) | BIT(WDP1) | BIT(WDP0);	
+	MCUSR &= ~BIT(WDRF);
+	WDTCSR = BIT(WDCE) | BIT(WDE);
+	WDTCSR = BIT(WDIE) | BIT(WDP1) | BIT(WDP0);
 }
 
 void shutdown_wdt() {
@@ -508,7 +511,7 @@ int main(void)
 	
 	// Enable power switch IO
 	OUTPUT_DDR |= BIT(OUTPUT_PIN);
-	
+		
 	// Disable Timer 0 via PRR
 	PRR0 = BIT(PRTIM0) | BIT(PRTIM2) | BIT(PRUSART1) | BIT(PRSPI) | BIT(PRUSART0);
 	PRR1 = BIT(PRTIM3);
@@ -586,7 +589,7 @@ int main(void)
 		
 		// Sleep
 		// USI counter overflows wake the controller up from IDLE only
-		if(TWI_I2C_Busy() || TIMER1_CAL_IN_PROGRESS) {
+		if(TWI_I2C_Busy() || TIMER1_CAL_IN_PROGRESS || 1) {
 			set_time_source(CLOCK_TIMER);
 			sleep_mode = SLEEP_MODE_IDLE;
 		} else {
