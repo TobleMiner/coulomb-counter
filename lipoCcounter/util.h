@@ -12,4 +12,6 @@
 #define NULL ((void*)0U)
 #endif
 
+#define CLAMPH(x, max) (((x) > (max) ? (max) : (x)))
+
 #endif

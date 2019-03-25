@@ -14,7 +14,7 @@ uint16_t write_addr;
 #define LOG_DATA_LEN (sizeof(struct eeprom_log_data_priv))
 #define DEV_DATA_LEN (sizeof(struct eeprom_device_block))
 
-#define LOG_ENTRIES ((EEPROM_SIZE - sizeof(struct eeprom_device_block)) / LOG_ENTRY_LEN)
+#define LOG_ENTRIES CLAMPH(((EEPROM_SIZE - sizeof(struct eeprom_device_block)) / LOG_ENTRY_LEN), 256)
 
 EEMEM struct eeprom_device_block devicedata = {
 	.design_capacity_mAh = 2500
@@ -81,7 +81,7 @@ uint8_t eeprom_busy() {
 
 void eeprom_write_next_byte() {
 	EEARL = write_addr & 0xFF;
-	EEARH = (write_addr >> 8) & 0x01;
+	EEARH = (write_addr >> 8);
 	EEDR = *write_data;
 	EECR |= BIT(EEMPE) | BIT(EERIE);
 	EECR |= BIT(EEPE);
