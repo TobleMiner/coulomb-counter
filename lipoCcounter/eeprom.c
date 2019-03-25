@@ -14,7 +14,7 @@ uint16_t write_addr;
 #define LOG_DATA_LEN (sizeof(struct eeprom_log_data_priv))
 #define DEV_DATA_LEN (sizeof(struct eeprom_device_block))
 
-#define LOG_ENTRIES CLAMPH(((EEPROM_SIZE - sizeof(struct eeprom_device_block)) / LOG_ENTRY_LEN), 256)
+#define LOG_ENTRIES CLAMPH(((EEPROM_SIZE - sizeof(struct eeprom_device_block)) / LOG_ENTRY_LEN), 255)
 
 EEMEM struct eeprom_device_block devicedata = {
 	.design_capacity_mAh = 2500
@@ -53,11 +53,17 @@ static uint8_t eeprom_read_log_block(struct eeprom_log_block* log, uint8_t entry
 
 uint8_t eeprom_find_log_block() {
 	struct eeprom_log_block log;
+	struct eeprom_log_block last_log;
 	uint8_t entry = 0;
 	uint8_t found = 0;
 	uint8_t max_serial = 0;
 	while(entry < ARRAY_LEN(logdata)) {
 		if(eeprom_read_log_block(&log, entry)) {
+			if(found) {
+				if((last_log.data.serial == 0xFF) && (log.data.serial < last_log.data.serial)) {
+					max_serial = 0;
+				}
+			}
 			if(log.data.serial >= max_serial) {
 				log_block = log;
 				log_data = log_block.data.data;
@@ -65,6 +71,7 @@ uint8_t eeprom_find_log_block() {
 				inc_log();
 				found = 1;
 			}
+			last_log = log;
 		}
 		entry++;
 	}
