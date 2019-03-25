@@ -56,21 +56,34 @@ uint8_t eeprom_find_log_block() {
 	struct eeprom_log_block last_log;
 	uint8_t entry = 0;
 	uint8_t found = 0;
-	uint8_t max_serial = 0;
+	if(eeprom_read_log_block(&last_log, ARRAY_LEN(logdata) - 1)) {
+		found = 1;
+		log_block = last_log;
+		log_data = log_block.data.data;
+		next_log_entry = entry;
+		inc_log();
+	}
 	while(entry < ARRAY_LEN(logdata)) {
 		if(eeprom_read_log_block(&log, entry)) {
 			if(found) {
-				if((last_log.data.serial == 0xFF) && (log.data.serial < last_log.data.serial)) {
-					max_serial = 0;
+				uint8_t expected_serial = last_log.data.serial;
+				expected_serial++;
+				// Sequence break, last log entry is most recent one
+				if(log.data.serial != expected_serial) {
+					uint8_t prev_entry = entry;
+					prev_entry--;
+					log_block = last_log;
+					log_data = log_block.data.data;
+					next_log_entry = prev_entry;
+					inc_log();
+					break;
 				}
 			}
-			if(log.data.serial >= max_serial) {
-				log_block = log;
-				log_data = log_block.data.data;
-				next_log_entry = entry;
-				inc_log();
-				found = 1;
-			}
+			log_block = log;
+			log_data = log_block.data.data;
+			next_log_entry = entry;
+			inc_log();
+			found = 1;
 			last_log = log;
 		}
 		entry++;
