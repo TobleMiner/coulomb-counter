@@ -17,7 +17,10 @@ uint16_t write_addr;
 #define LOG_ENTRIES CLAMPH(((EEPROM_SIZE - sizeof(struct eeprom_device_block)) / LOG_ENTRY_LEN), 255)
 
 EEMEM struct eeprom_device_block devicedata = {
-	.design_capacity_mAh = 2500
+	.design_capacity_mAh = 2500,
+	.design_voltage_mV = 3700,
+	.max_voltage_mV = 4200,
+	.min_voltage_mV = 2900,
 };
 EEMEM struct eeprom_log_block logdata[LOG_ENTRIES];
 
