@@ -12,7 +12,10 @@ struct eeprom_log_data {
 	uint16_t cycle_count;
 	struct {
 		uint8_t output_on:1;
-		uint8_t power_down_low_voltage:1;
+		struct {
+			uint8_t undervoltage:1;
+			uint8_t overvoltage:1;
+		} battery;
 	} flags;
 };
 
