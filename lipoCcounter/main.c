@@ -277,7 +277,7 @@ void set_output_state(uint8_t val) {
 
 void timeval_add_nsec(struct timeval_t* t, uint64_t nsecs) {
 	t->nsecs += nsecs;
-	if(t->nsecs >= SEC_NSECS) {
+	while(t->nsecs >= SEC_NSECS) {
 		t->secs++;
 		t->nsecs -= SEC_NSECS;
 	}
