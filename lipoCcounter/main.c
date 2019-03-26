@@ -27,17 +27,20 @@
 #define CURRENT_GAIN 10ULL
 #define REF_VOLTAGE 1100ULL
 
-#define TIMER_TICK_NS          8000000UL
-#define TIMER_COUNTER_NS         32000UL
-#define SEC_NSECS           1000000000UL
-#define SEC_USECS              1000000UL
 #define TIMER1_LIMIT 250
-#define WDT_TICK_ACTIVE_NS    16000000UL
-#define WDT_TICK_PASSIVE_NS 1000000000UL
-#define MEASURE_INTERVAL_ACTIVE_NS  20000000UL // Each 20 ms
-// Occasional wakeup is also important while passive since attaching of a charger must be detected
-#define MEASURE_INTERVAL_PASSIVE_NS 5000000000UL // Each 5000 ms
+
+// Time interval definitions
+#define SEC_NSECS                   1000000000ULL
+#define SEC_USECS                      1000000ULL
+#define TIMER_TICK_NS                  8000000ULL      // 8 ms per interrupt
+#define TIMER_COUNTER_NS                 32000ULL      // 32 us per counter tick
+#define WDT_TICK_ACTIVE_NS            16000000ULL      // Each 16 ms
+#define WDT_TICK_PASSIVE_NS         SEC_NSECS          // Each 1000 ms
+#define MEASURE_INTERVAL_ACTIVE_NS    20000000ULL      // Each 20 ms
+#define MEASURE_INTERVAL_PASSIVE_NS (5ULL * SEC_NSECS) // Each 5000 ms
 #define LOG_INTERVAL_SEC 60UL
+
+
 #define EPSILON_CHARGE_UA 1000UL
 #define CHARGE_HYSTERESIS_UA 300UL
 #define EPSILON_CHARGE_LOWER (((EPSILON_CHARGE_UA - CHARGE_HYSTERESIS_UA) * SHUNT_RESISTANCE * ADC_SAMPLES * 512LL * CURRENT_GAIN) / 1000000LL / SHUNT_RESISTANCE)
