@@ -27,13 +27,14 @@
 #define CURRENT_GAIN 10ULL
 #define REF_VOLTAGE 1100ULL
 
-#define TIMER_TICK_NS 8000000UL 
-#define TIMER_COUNTER_NS 32000UL
-#define SEC_NSECS 1000000000UL
-#define SEC_USECS 1000000UL
+#define TIMER_TICK_NS          8000000UL
+#define TIMER_COUNTER_NS         32000UL
+#define SEC_NSECS           1000000000UL
+#define SEC_USECS              1000000UL
 #define TIMER1_LIMIT 250
-#define WDT_TICK_NS 125000000UL
-#define MEASURE_INTERVAL_ACTIVE_NS  100000000UL // Each 100 ms
+#define WDT_TICK_ACTIVE_NS    16000000UL
+#define WDT_TICK_PASSIVE_NS 1000000000UL
+#define MEASURE_INTERVAL_ACTIVE_NS  20000000UL // Each 20 ms
 // Occasional wakeup is also important while passive since attaching of a charger must be detected
 #define MEASURE_INTERVAL_PASSIVE_NS 5000000000UL // Each 5000 ms
 #define LOG_INTERVAL_SEC 60UL
@@ -58,7 +59,8 @@ struct {
 } timer1_cal;
 
 struct {
-	uint64_t tick_ns;
+	uint64_t tick_active_ns;
+	uint64_t tick_passive_ns;
 } wdt_cal;
 
 #define REG64_CHANGED(reg) (\
@@ -238,6 +240,7 @@ enum {
 struct {
 	uint8_t adc:2;
 	uint8_t timesource:2;
+	uint8_t active:1;
 	uint8_t output_on:1;
 	uint8_t charging:1;
 } state;
@@ -356,11 +359,24 @@ void shutdown_timer1() {
 	PRR0 |= BIT(PRTIM1);
 }
 
+#define TIMER1_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_TIMER1)
+#define WDT_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_WDT)
+#define CLOCK_CAL_IN_PROGRESS (TIMER1_CAL_IN_PROGRESS || WDT_CAL_IN_PROGRESS)
+
+#define POWER_ACTIVE (state.output_on)
+
+#define WDT_HIGH_RES (POWER_ACTIVE || WDT_CAL_IN_PROGRESS)
+
 void setup_wdt() {
-	// Set up watchdog timer, ~8 interrupts per second
+	// Set up watchdog timer, ~1 interrupt per second
+	uint8_t prescaler_bits = BIT(WDIE) | BIT(WDP2) | BIT(WDP1);
+	if(WDT_HIGH_RES) {
+		// One interrupt each 16 ms in active mode
+		prescaler_bits = BIT(WDIE);
+	}
 	MCUSR &= ~BIT(WDRF);
 	WDTCSR = BIT(WDCE) | BIT(WDE);
-	WDTCSR = BIT(WDIE) | BIT(WDP1) | BIT(WDP0);
+	WDTCSR = prescaler_bits;
 }
 
 void shutdown_wdt() {
@@ -370,7 +386,7 @@ void shutdown_wdt() {
 }
 
 void set_time_source(uint8_t source) {
-	if(source == state.timesource) {
+	if(source == state.timesource && WDT_HIGH_RES == state.active) {
 		return;
 	}
 	ATOMIC_BEGIN
@@ -387,6 +403,7 @@ void set_time_source(uint8_t source) {
 	}
 	ATOMIC_END
 	state.timesource = source;
+	state.active = WDT_HIGH_RES;
 }
 
 void setup_adc() {
@@ -407,14 +424,12 @@ void adc_start_measure() {
 	ADCSRA = BIT(ADEN) | BIT(ADIE) | BIT(ADPS0) | BIT(ADPS1) | BIT(ADPS2);
 }
 
-#define DEVICE_ACTIVE (state.output_on)
-
 uint8_t adc_process() {
 	int64_t tmp;
 	if(flags.adc_I) {
 		flags.adc_I = 0;
 		// Transmission gate prevents device from being charged/discharged
-		if(!DEVICE_ACTIVE) {
+		if(!POWER_ACTIVE) {
 			adc_shunt_cal = adcs;
 			// Short path. Target device is inactive, no need to perform further measurements
 			reg_adc_calh.data = (adcs >> 8) & 0xFF;
@@ -466,9 +481,6 @@ uint8_t adc_process() {
 	return 0;
 }
 
-#define TIMER1_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_TIMER1)
-#define WDT_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_WDT)
-#define CLOCK_CAL_IN_PROGRESS (TIMER1_CAL_IN_PROGRESS || WDT_CAL_IN_PROGRESS)
 #define LAST_CAL_TIMER1 (last_cal == CALIBRATE_TIMER1)
 #define LAST_CAL_WDT (last_cal == CALIBRATE_WDT)
 #define LAST_CAL_CLOCK (LAST_CAL_TIMER1 || LAST_CAL_WDT)
@@ -503,7 +515,8 @@ int main(void)
 	timer1_cal.counter_ns = TIMER_COUNTER_NS;
 	timer1_cal.tick_ns = TIMER_TICK_NS;
 	
-	wdt_cal.tick_ns = WDT_TICK_NS;
+	wdt_cal.tick_active_ns = WDT_TICK_ACTIVE_NS;
+	wdt_cal.tick_passive_ns = WDT_TICK_PASSIVE_NS;
 	
 	struct timeval_t clock_cal_start;
 	uint8_t last_cal = CALIBRATE_NONE;
@@ -517,6 +530,11 @@ int main(void)
 	// Disable Timer 0 via PRR
 	PRR0 = BIT(PRTIM0) | BIT(PRTIM2) | BIT(PRUSART1) | BIT(PRSPI) | BIT(PRUSART0);
 	PRR1 = BIT(PRTIM3);
+	
+	// Enable debug IOs
+	DEBUG_INIT(PB1);
+	DEBUG_INIT(PB2);
+	DEBUG_INIT(PB3);
 
 	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
 		memset(regs[i], 0, sizeof(struct TWI_I2C_Reg));
@@ -576,7 +594,7 @@ int main(void)
 		if(timecmp(&time, &next_measure) != LT && ADC_IDLE) {
 			adc_start_measure();
 			next_measure = time;
-			timeval_add_nsec(&next_measure, DEVICE_ACTIVE ? MEASURE_INTERVAL_ACTIVE_NS : MEASURE_INTERVAL_PASSIVE_NS);
+			timeval_add_nsec(&next_measure, POWER_ACTIVE ? MEASURE_INTERVAL_ACTIVE_NS : MEASURE_INTERVAL_PASSIVE_NS);
 		}
 
 		// Check if we should write a log entry
@@ -626,7 +644,8 @@ int main(void)
 				timer1_cal.tick_ns = (timer1_cal.tick_ns * delta_cal) / delta_local;
 			}
 			else if(LAST_CAL_WDT) {
-				wdt_cal.tick_ns = (wdt_cal.tick_ns * delta_cal) / delta_local;
+				wdt_cal.tick_active_ns = (wdt_cal.tick_active_ns * delta_cal) / delta_local;
+				wdt_cal.tick_passive_ns = (wdt_cal.tick_passive_ns * delta_cal) / delta_local;
 			}
 			REG64_WRITE(&reg_cal, 0ULL);
 		}
@@ -659,6 +678,7 @@ uint16_t adc_val() {
 }
 
 ISR(ADC_vect) {
+	DEBUG_BLIP(PB3);
 	if(adc_cnt >= ADC_SKIP_SAMPLES) {
 		if(ADC_CONVERSION_IS_BIPOLAR) {
 			adcs += adc_val_bipo();
@@ -680,15 +700,21 @@ ISR(ADC_vect) {
 }
 
 ISR(TIMER1_COMPA_vect) {
+	DEBUG_BLIP(PB1);
 	timeval_add_nsec(&past, timer1_cal.tick_ns);
 }
 
 ISR(WDT_vect) {
-	timeval_add_nsec(&past, wdt_cal.tick_ns);	
+	DEBUG_BLIP(PB2);
+	if(WDT_HIGH_RES) {
+		timeval_add_nsec(&past, wdt_cal.tick_active_ns);
+	} else {
+		timeval_add_nsec(&past, wdt_cal.tick_passive_ns);		
+	}
 }
 
 ISR(PCINT0_vect) {
-	if(!DEVICE_ACTIVE) {
+	if(!POWER_ACTIVE) {
 		// Do something with the value of SDA/SCL
 	}
 }
