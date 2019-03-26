@@ -27,6 +27,8 @@
 #define CURRENT_GAIN 10ULL
 #define REF_VOLTAGE 1100ULL
 
+#define BATTERY_STATE_SAMPLES 8
+
 #define TIMER1_LIMIT 250
 
 // Time interval definitions
@@ -45,6 +47,8 @@
 #define CHARGE_HYSTERESIS_UA 300UL
 #define EPSILON_CHARGE_LOWER (((EPSILON_CHARGE_UA - CHARGE_HYSTERESIS_UA) * SHUNT_RESISTANCE * ADC_SAMPLES * 512LL * CURRENT_GAIN) / 1000000LL / SHUNT_RESISTANCE)
 #define EPSILON_CHARGE_UPPER ((EPSILON_CHARGE_UA * SHUNT_RESISTANCE * ADC_SAMPLES * 512LL * CURRENT_GAIN) / 1000000LL / SHUNT_RESISTANCE)
+
+#define EPSILON_CHARGE_MV 50UL
 
 const int64_t current_div = (int64_t)CURRENT_GAIN * 512LL * (int64_t)ADC_SAMPLES * (int64_t)SHUNT_RESISTANCE;
 const int64_t sec_psecs = 1000LL * (int64_t)SEC_USECS;
@@ -127,6 +131,18 @@ volatile struct {
 	uint8_t log_loaded:1;
 } flags;
 
+struct battery_flag {
+	uint8_t value:1;
+	uint8_t set:1;
+	uint8_t clear:1;
+	uint8_t counter:5;
+};
+
+struct {
+	struct battery_flag overvoltage;
+	struct battery_flag undervoltage;
+} battery;
+
 #define REG64(name) \
 	struct TWI_I2C_Reg name##_56;\
 	struct TWI_I2C_Reg name##_48;\
@@ -183,6 +199,8 @@ REG32(reg_design_capacity_mAs);
 
 REG32(reg_current_capacity_mAs);
 
+struct TWI_I2C_Reg reg_battery_flags;
+
 struct TWI_I2C_Reg* regs[] = {
 	&reg_Ih,
 	&reg_Il,
@@ -206,20 +224,21 @@ struct TWI_I2C_Reg* regs[] = {
 	&reg_cal_8,     // 19
 	&reg_cal_0,     // 20
 	&reg_output,    // 21
-	&reg_I_avgh,
-	&reg_I_avgl,
-	&reg_time_left_24,
-	&reg_time_left_16,
-	&reg_time_left_8,
-	&reg_time_left_0,
-	&reg_design_capacity_mAs_24,
-	&reg_design_capacity_mAs_16,
-	&reg_design_capacity_mAs_8,
-	&reg_design_capacity_mAs_0,
-	&reg_current_capacity_mAs_24,
-	&reg_current_capacity_mAs_16,
-	&reg_current_capacity_mAs_8,
-	&reg_current_capacity_mAs_0,
+	&reg_I_avgh,    // 22
+	&reg_I_avgl,    // 23
+	&reg_time_left_24, // 24
+	&reg_time_left_16, // 25
+	&reg_time_left_8,  // 26
+	&reg_time_left_0,  // 27
+	&reg_design_capacity_mAs_24, // 28
+	&reg_design_capacity_mAs_16, // 29
+	&reg_design_capacity_mAs_8, // 30
+	&reg_design_capacity_mAs_0, // 31
+	&reg_current_capacity_mAs_24, // 32
+	&reg_current_capacity_mAs_16, // 33
+	&reg_current_capacity_mAs_8,  // 34
+	&reg_current_capacity_mAs_0,  // 35
+	&reg_battery_flags            // 36
 };
 
 enum {
@@ -427,6 +446,42 @@ void adc_start_measure() {
 	ADCSRA = BIT(ADEN) | BIT(ADIE) | BIT(ADPS0) | BIT(ADPS1) | BIT(ADPS2);
 }
 
+#define RESET_FLAG_COUNTER(flag) ((flag).counter = 0)
+
+#define PROCESS_FLAG(flag, val, limit, hysteresis, invert) \
+	do {\
+		if(((invert) ? (val) + (hysteresis) < (limit) : (val) > (limit) + (hysteresis))&& !(flag).value) {\
+			if((flag).clear) {\
+				(flag).clear = 0;\
+				(flag).counter = 0;\
+			}\
+			(flag).set = 1;\
+			if((flag).counter >= BATTERY_STATE_SAMPLES) {\
+				(flag).value = 1;\
+			} else {\
+				(flag).counter++;\
+			}\
+		}\
+		if(((invert) ? (val) > (limit) + (hysteresis) : (val) + (hysteresis) < (limit)) && (flag).value) {\
+			if((flag).set) {\
+				(flag).set = 0;\
+				(flag).counter = 0;\
+			}\
+			(flag).clear = 1;\
+			if((flag).counter >= BATTERY_STATE_SAMPLES) {\
+				(flag).value = 0;\
+			} else {\
+				(flag).counter++;\
+			}\
+		}\
+	} while(0)
+
+#define PROCESS_FLAG_UPPER(flag, val, limit, hysteresis)\
+	PROCESS_FLAG(flag, val, limit, hysteresis, 0)
+
+#define PROCESS_FLAG_LOWER(flag, val, limit, hysteresis)\
+	PROCESS_FLAG(flag, val, limit, hysteresis, 1)
+
 uint8_t adc_process() {
 	int64_t tmp;
 	if(flags.adc_I) {
@@ -458,6 +513,7 @@ uint8_t adc_process() {
 			adcs = current_uA_avg / 10LL;
 			reg_I_avgh.data = (adcs >> 8) & 0xFF;
 			reg_I_avgl.data = adcs & 0xFF;
+			update_mAs_count();
 			// Calculate time left
 //			tmp = dev_block.design_capacity_mAh * 3600LL * 1000LL / current_uA_avg;
 //			REG32_WRITE(&reg_time_left, tmp);
@@ -470,6 +526,7 @@ uint8_t adc_process() {
 	}
 	if(flags.adc_U) {
 		flags.adc_U = 0;
+		// Calculate voltage
 		tmp = adc;
 		tmp = REF_VOLTAGE * 1024UL * ADC_SAMPLES / tmp;
 		voltage_mV = tmp;
@@ -477,7 +534,11 @@ uint8_t adc_process() {
 		reg_Uh.data = (adc >> 8) & 0xFF;
 		reg_Ul.data = adc & 0xFF;
 		adc = 0;
-		update_mAs_count();
+
+		// Process result
+		PROCESS_FLAG_UPPER(battery.overvoltage, voltage_mV, dev_block.max_voltage_mV, EPSILON_CHARGE_MV);
+		PROCESS_FLAG_LOWER(battery.undervoltage, voltage_mV, dev_block.min_voltage_mV, EPSILON_CHARGE_MV);
+
 		shutdown_adc();
 		state.adc = ADC_STATE_IDLE;
 	}
@@ -509,6 +570,8 @@ int main(void)
 	flags.adc_I = 0;
 	flags.adc_U = 0;
 	flags.log_loaded = 0;
+
+	memset(&battery, 0, sizeof(battery));
 
 	state.timesource = CLOCK_NONE;
 	state.adc = ADC_STATE_IDLE;
@@ -552,6 +615,8 @@ int main(void)
 	// Read last log block
 	if(eeprom_find_log_block()) {
 		flags.log_loaded = 1;
+		battery.overvoltage.value = log_data.flags.battery.overvoltage;
+		battery.undervoltage.value = log_data.flags.battery.undervoltage;
 	} else {
 		log_data.last_capacity_mAs = dev_block.design_capacity_mAh * 3600UL;
 	}
@@ -603,6 +668,8 @@ int main(void)
 		// Check if we should write a log entry
 		if(timecmp(&time, &next_log_write) != LT && !eeprom_busy()) {
 			log_data.flags.output_on = state.output_on;
+			log_data.flags.battery.overvoltage = battery.overvoltage.value;
+			log_data.flags.battery.undervoltage = battery.undervoltage.value;
 			log_data.mAs = mAs_count;
 			log_data.adc_shunt_cal = adc_shunt_cal;
 			eeprom_write_log_block();
@@ -659,12 +726,20 @@ int main(void)
 		// Process power-up/power-down requests
 		if(reg_output.data != state.output_on) {
 			set_output_state(reg_output.data);
+			// Reset measurement time interval monitor
+			if(state.output_on) {
+				now(&last_measure);
+				RESET_FLAG_COUNTER(battery.overvoltage);
+				RESET_FLAG_COUNTER(battery.undervoltage);
+			}
 		}
 
 		// Data processing
 		//DEBUG_LO;
 		adc_process();
 		//DEBUG_HI;
+
+		reg_battery_flags.data = (battery.overvoltage.value << 0) | (battery.undervoltage.value << 1);
 	}
 }
 
