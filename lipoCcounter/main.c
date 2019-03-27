@@ -34,6 +34,7 @@
 // Time interval definitions
 #define SEC_NSECS                   1000000000ULL
 #define SEC_USECS                      1000000ULL
+#define DEBOUNCE_NS                   10000000ULL      // 10ms between button presses
 #define TIMER_TICK_NS                  8000000ULL      // 8 ms per interrupt
 #define TIMER_COUNTER_NS                 32000ULL      // 32 us per counter tick
 #define WDT_TICK_ACTIVE_NS            16000000ULL      // Each 16 ms
@@ -63,9 +64,15 @@ const int64_t sec_psecs = 1000LL * (int64_t)SEC_USECS;
 #define CHARGE_SENSE_PIN   PIND2
 #define CHARGE_SENSE_PINR  PIND
 
+#define POWER_REQUEST_DDR  DDRD
+#define POWER_REQUEST_PORT PORTD
+#define POWER_REQUEST_PIN  PIND3
+
 //#define INVERT_OUTPUT
 //#define INVERT_CHARGE
 
+
+struct timeval_t power_request_debounce;
 
 struct {
 	uint64_t tick_ns;
@@ -136,6 +143,7 @@ volatile struct {
 	uint8_t adc_I:1;
 	uint8_t adc_U:1;
 	uint8_t log_loaded:1;
+	uint8_t power_request:1;
 } flags;
 
 struct battery_flag {
@@ -586,8 +594,19 @@ uint8_t adc_process() {
 	return calibration_performed;
 }
 
-void process_digital_io() {
+void digital_io_process(struct timeval_t* time) {
 	state.charger_detect = !!(CHARGE_SENSE_PINR & BIT(CHARGE_SENSE_PIN));
+	
+	if(flags.power_request) {
+		flags.power_request = 0;
+		if(timecmp(time, &power_request_debounce) != LT) {
+			if(!GET_FLAG(battery.undervoltage)) {
+				output_on();
+			}
+		}
+		power_request_debounce = *time;
+		timeval_add_nsec(&power_request_debounce, DEBOUNCE_NS);
+	}
 }
 
 #define CHARGER_DETECTED (state.charger_detect)
@@ -630,9 +649,9 @@ int main(void)
 	past.nsecs = 0;
 	past.secs = 0;
 	
-	flags.adc_I = 0;
-	flags.adc_U = 0;
-	flags.log_loaded = 0;
+	memset(&power_request_debounce, 0, sizeof(power_request_debounce));
+
+	memset((void*)&flags, 0, sizeof(flags));
 
 	memset(&battery, 0, sizeof(battery));
 
@@ -663,15 +682,24 @@ int main(void)
 	// Set up charger sensing
 	CHARGE_SENSE_DDR &= ~BIT(CHARGE_SENSE_PIN);
 	EICRA |= BIT(ISC01) | BIT(ISC00);
+	EIMSK |= BIT(INT0);
+	
+	// Set up power request pin
+	POWER_REQUEST_DDR &= ~BIT(POWER_REQUEST_PIN);
+	POWER_REQUEST_PORT |= BIT(POWER_REQUEST_PIN);
+	EICRA |= BIT(ISC11);
 
 	// Disable Timer 0 via PRR
 	PRR0 = BIT(PRTIM0) | BIT(PRTIM2) | BIT(PRUSART1) | BIT(PRSPI) | BIT(PRUSART0);
 	PRR1 = BIT(PRTIM3);
+	EIMSK |= BIT(INT1);
 	
 	// Enable debug IOs
 	DEBUG_INIT(PB1);
 	DEBUG_INIT(PB2);
 	DEBUG_INIT(PB3);
+	DEBUG_INIT(PB4);
+	DEBUG_INIT(PB5);
 
 	for(i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
 		memset(regs[i], 0, sizeof(struct TWI_I2C_Reg));
@@ -770,9 +798,6 @@ int main(void)
 		sleep_enable();
 		sleep_cpu();
 		
-		// Process digital inputs
-		process_digital_io();
-		
 		// Process calibration requests
 		ATOMIC_BEGIN
 		if(CLOCK_CAL_IN_PROGRESS) {
@@ -801,7 +826,12 @@ int main(void)
 		reg_cal_flags.attr.changed = 0;
 		last_cal = reg_cal_flags.data;
 		ATOMIC_END
-		
+
+		now(&time);
+
+		// Process digital inputs
+		digital_io_process(&time);
+	
 		// Process power-up/power-down requests
 		if(reg_output.data != state.output_on) {
 			set_output_state(reg_output.data);
@@ -823,9 +853,6 @@ int main(void)
 		
 		// Battery status processing
 		battery_process();
-
-		reg_battery_flags.data = (GET_FLAG(battery.overvoltage) << 0) | \
-			(GET_FLAG(battery.undervoltage) << 1);
 	}
 }
 
@@ -878,5 +905,11 @@ ISR(WDT_vect) {
 }
 
 ISR(INT0_vect) {
+	DEBUG_BLIP(PB5);
 	// NOP, just wake up from sleep mode
+}
+
+ISR(INT1_vect) {
+	DEBUG_BLIP(PB4);
+	flags.power_request = 1;
 }
