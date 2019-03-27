@@ -14,4 +14,6 @@
 
 #define CLAMPH(x, max) (((x) > (max) ? (max) : (x)))
 
+#define ABS(x) ((x) < 0 ? -(x) : (x))
+
 #endif

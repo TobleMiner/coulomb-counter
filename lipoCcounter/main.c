@@ -32,6 +32,7 @@
 #define TIMER1_LIMIT 250
 
 // Time interval definitions
+#define SEC_PSECS                1000000000000ULL
 #define SEC_NSECS                   1000000000ULL
 #define SEC_USECS                      1000000ULL
 #define DEBOUNCE_NS                   10000000ULL      // 10ms between button presses
@@ -49,7 +50,6 @@
 #define HYSTERESIS_CHARGE_MV 50UL
 
 const int64_t current_div = (int64_t)CURRENT_GAIN * 512LL * (int64_t)ADC_SAMPLES * (int64_t)SHUNT_RESISTANCE;
-const int64_t sec_psecs = 1000LL * (int64_t)SEC_USECS;
 
 #define OUTPUT_DDR  DDRB
 #define OUTPUT_PORT PORTB
@@ -130,6 +130,7 @@ int64_t current_uA;
 int64_t current_uA_avg;
 int16_t voltage_mV;
 
+int64_t uAns_count;
 int32_t mAs_count;
 
 struct timeval_t past;
@@ -405,18 +406,6 @@ uint64_t timedelta_ns(struct timeval_t* pre, struct timeval_t* post) {
 	return SEC_NSECS * delta.secs + delta.nsecs;
 }
 
-void update_mAs_count() {
-	struct timeval_t current;
-	struct timeval_t delta;
-	now(&current);
-	timedelta(&last_measure, &current, &delta);
-
-	mAs_count += ((int64_t)delta.secs) * current_uA / 1000L;
-	mAs_count += ((int64_t)delta.nsecs) * current_uA / sec_psecs;
-	REG32_WRITE(&reg_mAs, mAs_count);
-	last_measure = current;
-}
-
 void setup_timer1()  {
 	PRR0 &= ~BIT(PRTIM1);
 	// Set up timer (CLKDIV /512, compare match)
@@ -536,6 +525,19 @@ void adc_start_measure() {
 #define PROCESS_FLAG_LOWER(flag, val, limit, hysteresis)\
 	PROCESS_FLAG(flag, val, limit, hysteresis, 1)
 
+void update_mAs_count() {
+	struct timeval_t current;
+	struct timeval_t delta;
+	now(&current);
+	timedelta(&last_measure, &current, &delta);
+
+	uAns_count += ((int64_t)delta.secs) * (int64_t)current_uA * SEC_NSECS;
+	uAns_count += ((int64_t)delta.nsecs) * (int64_t)current_uA;
+	mAs_count = uAns_count / 1000LL / SEC_NSECS;
+	REG32_WRITE(&reg_mAs, mAs_count);
+	last_measure = current;
+}
+
 uint8_t adc_process() {
 	int64_t tmp;
 	uint8_t calibration_performed = 0;
@@ -561,12 +563,13 @@ uint8_t adc_process() {
 			
 			// Update capacity tracking
 			update_mAs_count();
-			// Calculate time left
-//			tmp = dev_block.design_capacity_mAh * 3600LL * 1000LL / current_uA_avg;
-//			REG32_WRITE(&reg_time_left, tmp);
 
 			// Update current dependent flags
 			PROCESS_FLAG_UPPER(battery.charging, current_uA, EPSILON_CHARGE_UA, HYSTERESIS_CHARGE_UA);
+
+			// Calculate time left
+			tmp = mAs_count * 1000LL / ABS(current_uA_avg);
+			REG32_WRITE(&reg_time_left, tmp);
 		}
 		adcs = 0;
 		state.adc = ADC_STATE_U;
@@ -624,6 +627,13 @@ void battery_process() {
 	}
 	if(GET_FLAG(battery.undervoltage)) {
 		output_off();
+	}
+	
+	reg_battery_flags.data = (GET_FLAG(battery.overvoltage) << 0) | \
+		(GET_FLAG(battery.undervoltage) << 1);
+		
+	if(ABS(mAs_count) > log_data.last_capacity_mAs) {
+		log_data.last_capacity_mAs = ABS(mAs_count);
 	}
 }
 
@@ -727,10 +737,11 @@ int main(void)
 	
 	// Load data from device block
 	REG32_WRITE(&reg_design_capacity_mAs, dev_block.design_capacity_mAh * 3600UL);
-	
+
 	// Load data from log block
 	set_output_state(log_data.flags.output_on);
 	mAs_count = log_data.mAs;
+	uAns_count = log_data.mAs * SEC_NSECS * 1000LL;
 	REG32_WRITE(&reg_current_capacity_mAs, log_data.last_capacity_mAs);
 
 	sei();
