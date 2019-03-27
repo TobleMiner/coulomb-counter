@@ -42,13 +42,10 @@
 #define MEASURE_INTERVAL_PASSIVE_NS (5ULL * SEC_NSECS) // Each 5000 ms
 #define LOG_INTERVAL_SEC 60UL
 
-
 #define EPSILON_CHARGE_UA 1000UL
-#define CHARGE_HYSTERESIS_UA 300UL
-#define EPSILON_CHARGE_LOWER (((EPSILON_CHARGE_UA - CHARGE_HYSTERESIS_UA) * SHUNT_RESISTANCE * ADC_SAMPLES * 512LL * CURRENT_GAIN) / 1000000LL / SHUNT_RESISTANCE)
-#define EPSILON_CHARGE_UPPER ((EPSILON_CHARGE_UA * SHUNT_RESISTANCE * ADC_SAMPLES * 512LL * CURRENT_GAIN) / 1000000LL / SHUNT_RESISTANCE)
+#define HYSTERESIS_CHARGE_UA 300UL
 
-#define EPSILON_CHARGE_MV 50UL
+#define HYSTERESIS_CHARGE_MV 50UL
 
 const int64_t current_div = (int64_t)CURRENT_GAIN * 512LL * (int64_t)ADC_SAMPLES * (int64_t)SHUNT_RESISTANCE;
 const int64_t sec_psecs = 1000LL * (int64_t)SEC_USECS;
@@ -57,7 +54,17 @@ const int64_t sec_psecs = 1000LL * (int64_t)SEC_USECS;
 #define OUTPUT_PORT PORTB
 #define OUTPUT_PIN  PINB0
 
+#define CHARGE_DDR  DDRD
+#define CHARGE_PORT PORTD
+#define CHARGE_PIN  PIND0
+
+#define CHARGE_SENSE_DDR   DDRD
+#define CHARGE_SENSE_PORT  PORTD
+#define CHARGE_SENSE_PIN   PIND2
+#define CHARGE_SENSE_PINR  PIND
+
 //#define INVERT_OUTPUT
+//#define INVERT_CHARGE
 
 
 struct {
@@ -141,6 +148,9 @@ struct battery_flag {
 struct {
 	struct battery_flag overvoltage;
 	struct battery_flag undervoltage;
+	struct battery_flag charging;
+	// We might end up not needing this
+//	struct battery_flag discharging;
 } battery;
 
 #define REG64(name) \
@@ -201,6 +211,8 @@ REG32(reg_current_capacity_mAs);
 
 struct TWI_I2C_Reg reg_battery_flags;
 
+struct TWI_I2C_Reg reg_charge;
+
 struct TWI_I2C_Reg* regs[] = {
 	&reg_Ih,
 	&reg_Il,
@@ -238,7 +250,8 @@ struct TWI_I2C_Reg* regs[] = {
 	&reg_current_capacity_mAs_16, // 33
 	&reg_current_capacity_mAs_8,  // 34
 	&reg_current_capacity_mAs_0,  // 35
-	&reg_battery_flags            // 36
+	&reg_battery_flags,           // 36
+	&reg_charge,                  // 37
 };
 
 enum {
@@ -264,13 +277,16 @@ struct {
 	uint8_t timesource:2;
 	uint8_t active:1;
 	uint8_t output_on:1;
+	uint8_t charge_on:1;
 	uint8_t charging:1;
+	uint8_t charger_detect:1;
 } state;
 
 #define ADC_CONVERSION_IN_PROGRESS (ADCSRA & BIT(ADSC))
 #define ADC_CONVERSION_IS_BIPOLAR (state.adc == ADC_STATE_I)
 
 void output_on() {
+	reg_output.data = 1;
 	state.output_on = 1;
 #ifndef INVERT_OUTPUT
 	OUTPUT_PORT |= BIT(OUTPUT_PIN);
@@ -280,6 +296,7 @@ void output_on() {
 }
 
 void output_off() {
+	reg_output.data = 0;
 	state.output_on = 0;
 #ifndef INVERT_OUTPUT
 	OUTPUT_PORT &= ~BIT(OUTPUT_PIN);
@@ -294,7 +311,34 @@ void set_output_state(uint8_t val) {
 	} else {
 		output_off();
 	}
-	reg_output.data = val;
+}
+
+void charge_on() {
+	state.charge_on = 1;
+#ifndef INVERT_CHARGE
+	CHARGE_PORT |= BIT(CHARGE_PIN);
+#else
+	CHARGE_PORT &= ~BIT(CHARGE_PIN);
+#endif
+	reg_charge.data = 1;
+}
+
+void charge_off() {
+	state.charge_on = 0;
+#ifndef INVERT_CHARGE
+	CHARGE_PORT &= ~BIT(CHARGE_PIN);
+#else
+	CHARGE_PORT |= BIT(CHARGE_PIN);
+#endif
+	reg_charge.data = 0;
+}
+
+void set_charge_state(uint8_t val) {
+	if(val) {
+		charge_on();
+	} else {
+		charge_off();
+	}
 }
 
 void timeval_add_nsec(struct timeval_t* t, uint64_t nsecs) {
@@ -385,7 +429,7 @@ void shutdown_timer1() {
 #define WDT_CAL_IN_PROGRESS (reg_cal_flags.data == CALIBRATE_WDT)
 #define CLOCK_CAL_IN_PROGRESS (TIMER1_CAL_IN_PROGRESS || WDT_CAL_IN_PROGRESS)
 
-#define POWER_ACTIVE (state.output_on)
+#define POWER_ACTIVE (state.output_on || state.charge_on)
 
 #define WDT_HIGH_RES (POWER_ACTIVE || WDT_CAL_IN_PROGRESS)
 
@@ -448,6 +492,8 @@ void adc_start_measure() {
 
 #define RESET_FLAG_COUNTER(flag) ((flag).counter = 0)
 
+#define GET_FLAG(flag) ((flag).value)
+
 #define PROCESS_FLAG(flag, val, limit, hysteresis, invert) \
 	do {\
 		if(((invert) ? (val) + (hysteresis) < (limit) : (val) > (limit) + (hysteresis))&& !(flag).value) {\
@@ -484,26 +530,17 @@ void adc_start_measure() {
 
 uint8_t adc_process() {
 	int64_t tmp;
+	uint8_t calibration_performed = 0;
 	if(flags.adc_I) {
 		flags.adc_I = 0;
 		// Transmission gate prevents device from being charged/discharged
 		if(!POWER_ACTIVE) {
 			adc_shunt_cal = adcs;
-			// Short path. Target device is inactive, no need to perform further measurements
 			reg_adc_calh.data = (adcs >> 8) & 0xFF;
 			reg_adc_call.data = adcs & 0xFF;
-			adcs = 0;
-			shutdown_adc();
-			state.adc = ADC_STATE_IDLE;
-			return 1;
+			calibration_performed = 1;
 		} else {
 			tmp = adcs - adc_shunt_cal;
-			if(tmp >= EPSILON_CHARGE_UPPER) {
-				state.charging = 1;
-			}
-			else if(tmp < EPSILON_CHARGE_LOWER) {
-				state.charging = 0;
-			}
 			tmp = (tmp * (int64_t)REF_VOLTAGE * 1000000LL) / current_div;
 			current_uA = tmp;
 			adcs = tmp / 10LL;
@@ -513,16 +550,20 @@ uint8_t adc_process() {
 			adcs = current_uA_avg / 10LL;
 			reg_I_avgh.data = (adcs >> 8) & 0xFF;
 			reg_I_avgl.data = adcs & 0xFF;
+			
+			// Update capacity tracking
 			update_mAs_count();
 			// Calculate time left
 //			tmp = dev_block.design_capacity_mAh * 3600LL * 1000LL / current_uA_avg;
 //			REG32_WRITE(&reg_time_left, tmp);
-			
-			adcs = 0;
-			state.adc = ADC_STATE_U;
-			ADMUX  = BIT(REFS0) | BIT(MUX4) | BIT(MUX3) | BIT(MUX2) | BIT(MUX1);
-			ADCSRB = 0;
+
+			// Update current dependent flags
+			PROCESS_FLAG_UPPER(battery.charging, current_uA, EPSILON_CHARGE_UA, HYSTERESIS_CHARGE_UA);
 		}
+		adcs = 0;
+		state.adc = ADC_STATE_U;
+		ADMUX  = BIT(REFS0) | BIT(MUX4) | BIT(MUX3) | BIT(MUX2) | BIT(MUX1);
+		ADCSRB = 0;
 	}
 	if(flags.adc_U) {
 		flags.adc_U = 0;
@@ -536,13 +577,35 @@ uint8_t adc_process() {
 		adc = 0;
 
 		// Process result
-		PROCESS_FLAG_UPPER(battery.overvoltage, voltage_mV, dev_block.max_voltage_mV, EPSILON_CHARGE_MV);
-		PROCESS_FLAG_LOWER(battery.undervoltage, voltage_mV, dev_block.min_voltage_mV, EPSILON_CHARGE_MV);
+		PROCESS_FLAG_UPPER(battery.overvoltage, voltage_mV, dev_block.max_voltage_mV, HYSTERESIS_CHARGE_MV);
+		PROCESS_FLAG_LOWER(battery.undervoltage, voltage_mV, dev_block.min_voltage_mV, HYSTERESIS_CHARGE_MV);
 
 		shutdown_adc();
 		state.adc = ADC_STATE_IDLE;
 	}
-	return 0;
+	return calibration_performed;
+}
+
+void process_digital_io() {
+	state.charger_detect = !!(CHARGE_SENSE_PINR & BIT(CHARGE_SENSE_PIN));
+}
+
+#define CHARGER_DETECTED (state.charger_detect)
+
+void battery_process() {
+	if(GET_FLAG(battery.overvoltage)) {
+		charge_off();
+	} else {
+		if(CHARGER_DETECTED) {
+			charge_on();
+		}
+		else if(!GET_FLAG(battery.charging)) {
+			charge_off();
+		}
+	}
+	if(GET_FLAG(battery.undervoltage)) {
+		output_off();
+	}
 }
 
 #define LAST_CAL_TIMER1 (last_cal == CALIBRATE_TIMER1)
@@ -592,7 +655,15 @@ int main(void)
 	
 	// Enable power switch IO
 	OUTPUT_DDR |= BIT(OUTPUT_PIN);
-		
+	CHARGE_DDR |= BIT(CHARGE_PIN);
+	
+	// Always enable charging on startup to allow recovery from empty battery
+	charge_on();
+
+	// Set up charger sensing
+	CHARGE_SENSE_DDR &= ~BIT(CHARGE_SENSE_PIN);
+	EICRA |= BIT(ISC01) | BIT(ISC00);
+
 	// Disable Timer 0 via PRR
 	PRR0 = BIT(PRTIM0) | BIT(PRTIM2) | BIT(PRUSART1) | BIT(PRSPI) | BIT(PRUSART0);
 	PRR1 = BIT(PRTIM3);
@@ -618,7 +689,12 @@ int main(void)
 		battery.overvoltage.value = log_data.flags.battery.overvoltage;
 		battery.undervoltage.value = log_data.flags.battery.undervoltage;
 	} else {
+		// No log data, assume design capacity
 		log_data.last_capacity_mAs = dev_block.design_capacity_mAh * 3600UL;
+		// Assume battery is fully charged, too
+		log_data.mAs = log_data.last_capacity_mAs;
+		// No cycles, yay
+		log_data.cycle_count = 0;
 	}
 	
 	// Load data from device block
@@ -678,7 +754,7 @@ int main(void)
 		}
 		
 		// Sleep
-		// USI counter overflows wake the controller up from IDLE only
+		// TWI data wake the controller up from IDLE only
 		if(TWI_I2C_Busy() || TIMER1_CAL_IN_PROGRESS) {
 			set_time_source(CLOCK_TIMER);
 			sleep_mode = SLEEP_MODE_IDLE;
@@ -693,6 +769,9 @@ int main(void)
 		set_sleep_mode(sleep_mode);
 		sleep_enable();
 		sleep_cpu();
+		
+		// Process digital inputs
+		process_digital_io();
 		
 		// Process calibration requests
 		ATOMIC_BEGIN
@@ -729,17 +808,24 @@ int main(void)
 			// Reset measurement time interval monitor
 			if(state.output_on) {
 				now(&last_measure);
+				// Force a measurement
+				now(&next_measure);
+				// Clean slate, run full over-/undervoltage detection cycle
 				RESET_FLAG_COUNTER(battery.overvoltage);
 				RESET_FLAG_COUNTER(battery.undervoltage);
 			}
 		}
-
+		
 		// Data processing
 		//DEBUG_LO;
 		adc_process();
 		//DEBUG_HI;
+		
+		// Battery status processing
+		battery_process();
 
-		reg_battery_flags.data = (battery.overvoltage.value << 0) | (battery.undervoltage.value << 1);
+		reg_battery_flags.data = (GET_FLAG(battery.overvoltage) << 0) | \
+			(GET_FLAG(battery.undervoltage) << 1);
 	}
 }
 
@@ -791,8 +877,6 @@ ISR(WDT_vect) {
 	}
 }
 
-ISR(PCINT0_vect) {
-	if(!POWER_ACTIVE) {
-		// Do something with the value of SDA/SCL
-	}
+ISR(INT0_vect) {
+	// NOP, just wake up from sleep mode
 }
