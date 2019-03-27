@@ -839,9 +839,10 @@ int main(void)
 			set_output_state(reg_output.data);
 			// Reset measurement time interval monitor
 			if(state.output_on) {
+				shutdown_adc();
 				now(&last_measure);
 				// Force a measurement
-				now(&next_measure);
+				next_measure = last_measure;
 				// Clean slate, run full over-/undervoltage detection cycle
 				RESET_FLAG_COUNTER(battery.overvoltage);
 				RESET_FLAG_COUNTER(battery.undervoltage);
