@@ -741,6 +741,7 @@ int main(void)
 	} else {
 		uint8_t calibrated = 0;
 		output_off();
+		charge_off();
 		set_time_source(CLOCK_WDT);
 		adc_start_measure();
 		while (!calibrated) {
@@ -750,6 +751,7 @@ int main(void)
 			calibrated = adc_process();
 		}
 		set_output_state(log_data.flags.output_on);
+		charge_on();
 	}
 
 	while (1) {
