@@ -140,7 +140,7 @@ uint8_t USI_I2C_Busy() {
 //  reset the start condition detector to detect the next start condition.     //
 /////////////////////////////////////////////////////////////////////////////////
 
-ISR(USI_START_vect) {
+ISR(USI_START_vect) {	
 	USI_I2C_Slave_State = USI_SLAVE_CHECK_ADDRESS;
 
 	USI_SET_SDA_INPUT();
@@ -301,8 +301,9 @@ ISR(USI_OVF_vect) {
 				active_reg = USIDR;
 				usi_i2c_flags.reg_set = 1;
 			} else if(active_reg < usi_i2c_num_regs) {
-				usi_i2c_regs[active_reg]->data = USIDR;
-				usi_i2c_regs[active_reg]->attr.changed = 1;
+				uint8_t data_pre = usi_i2c_regs[active_reg]->data;
+				usi_i2c_regs[active_reg]->data = USIDR & usi_i2c_regs[active_reg]->write_mask;
+				usi_i2c_regs[active_reg]->attr.changed = data_pre != usi_i2c_regs[active_reg]->data;
 			}
 			
 			USIDR = 0;

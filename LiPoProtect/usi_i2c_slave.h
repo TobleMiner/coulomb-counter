@@ -64,6 +64,7 @@ struct USI_I2C_Reg {
 	struct {
 		uint8_t changed:1;
 	} attr;
+	uint8_t write_mask;
 	uint8_t data;
 };
 
